@@ -1,5 +1,6 @@
 # Fake ScreenStream broadcast extension: serves an H.264 file's access units as length-prefixed frames
-# at 60 fps, starting at a keyframe for each client, like the real extension on port 8400.
+# at 60 fps, starting at a keyframe for each client, like the real extension on port 8400. A "K" from the
+# client jumps to a keyframe at once, as the real one encodes a fresh keyframe.
 #   python3 fake-screenstream.py PORT FILE.h264   (Annex B with AUD NAL units, e.g. x264 aud=1)
 import socket, struct, sys, threading, time
 
@@ -13,8 +14,23 @@ keys = [i for i, u in enumerate(units) if b"\x00\x00\x00\x01\x65" in u or b"\x00
 def serve(conn: socket.socket) -> None:
     conn.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
     i = keys[0]
+    asked = threading.Event()
+
+    def read() -> None:
+        try:
+            while d := conn.recv(64):
+                if b"K" in d:
+                    asked.set()
+        except OSError:
+            pass
+
+    threading.Thread(target=read, daemon=True).start()
     try:
         while True:
+            if asked.is_set():
+                asked.clear()
+                i = keys[0]
+                print("keyframe requested", flush=True)
             conn.sendall(struct.pack(">I", len(units[i])) + units[i])
             i = i + 1 if i + 1 < len(units) else keys[0]
             time.sleep(1 / 60)

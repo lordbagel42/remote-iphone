@@ -31,7 +31,10 @@ const MJPEG_URL = process.env.RELAY_MJPEG_URL ?? "http://127.0.0.1:9100";
 const SOURCE = process.env.RELAY_SOURCE ?? "";
 const FPS = Number(process.env.RELAY_FPS ?? 30);
 const STREAM_PORT = Number(process.env.RELAY_STREAM_PORT ?? 8400);
-const MAX_UNACKED = Math.max(4, Math.round(FPS / 2)); // half a second of frames; beyond that skip to the next keyframe
+// A viewer whose oldest unacknowledged frame is older than this skips ahead to a fresh keyframe, which
+// ScreenStream encodes on request ("K"), so falling behind costs one frame instead of a long freeze.
+const MAX_LAG_MS = 400;
+const MAX_UNACKED = 240;
 const MAX_UNACKED_BYTES = 8 << 20;
 
 const log = (msg: string) => console.error(`${new Date().toISOString().slice(11, 19)} ${msg}`);
@@ -169,6 +172,7 @@ class Video {
   private proc: ChildProcess | null = null;
   private sock: net.Socket | null = null;
   private starting = false;
+  private keyAsked = 0;
   private buf: Buffer = Buffer.alloc(0);
   private idleTimer: NodeJS.Timeout | null = null;
   private restartTimer: NodeJS.Timeout | null = null;
@@ -184,6 +188,18 @@ class Video {
       this.sinks.delete(sink);
       if (!this.sinks.size) this.idleTimer = setTimeout(() => this.stop(), 30_000);
     };
+  }
+
+  /** Whether a keyframe can be had on request (ScreenStream) rather than only every 2 s (ffmpeg). */
+  get keysOnRequest(): boolean {
+    return this.sock !== null;
+  }
+
+  /** Asks ScreenStream for a keyframe of the current screen (ffmpeg's own come every 2 s). */
+  requestKey(): void {
+    if (!this.sock || Date.now() - this.keyAsked < 250) return;
+    this.keyAsked = Date.now();
+    this.sock.write("K");
   }
 
   /** ScreenStream on the phone when it answers, else the MJPEG transcoder (or RELAY_SOURCE). */
@@ -618,20 +634,23 @@ function streamViewer(ws: WebSocket, viewOnly: boolean, take: boolean): void {
   const gen = ++generation;
   let seq = 0;
   let needKey = true;
-  const unacked: { seq: number; bytes: number }[] = [];
+  const unacked: { seq: number; bytes: number; sent: number }[] = [];
+  const behind = () =>
+    (unacked.length > 0 && Date.now() - unacked[0].sent > MAX_LAG_MS) ||
+    unacked.length >= MAX_UNACKED ||
+    unacked.reduce((n, u) => n + u.bytes, 0) > MAX_UNACKED_BYTES;
   const send = (f: Frame) => {
-    if (needKey && !f.key) return;
-    const inFlight = unacked.reduce((n, u) => n + u.bytes, 0);
-    if (unacked.length >= MAX_UNACKED || inFlight > MAX_UNACKED_BYTES) {
-      needKey = true; // the viewer is behind; skip ahead to the next keyframe once it catches up
-      return;
-    }
+    if (behind()) return void (needKey = true); // skip ahead to a fresh keyframe once it catches up
+    if (needKey && !f.key) return video.requestKey();
     needKey = false;
     const msg = frameMessage(gen, ++seq, f);
-    unacked.push({ seq, bytes: msg.length });
+    unacked.push({ seq, bytes: msg.length, sent: Date.now() });
     ws.send(msg);
   };
-  for (const f of video.gop) send(f); // start from the latest keyframe without waiting for the next
+  // Start from the latest keyframe; a long group of pictures would replay seconds of old frames, so
+  // a short one is replayed and otherwise a fresh keyframe is asked for.
+  if (video.gop.length <= 10 || !video.keysOnRequest) for (const f of video.gop) send(f);
+  else video.requestKey();
   const unwatch = video.watch(send);
   ws.on("message", (data: Buffer, isBinary: boolean) => {
     try {
@@ -640,6 +659,7 @@ function streamViewer(ws: WebSocket, viewOnly: boolean, take: boolean): void {
       if (h.generation !== gen) throw new Error("stale generation");
       if (h.type === MESSAGE_TYPES.ack) {
         while (unacked.length && unacked[0].seq <= h.sequence) unacked.shift();
+        if (needKey && !behind()) video.requestKey();
       } else if (h.type === MESSAGE_TYPES.input && h.payloadLength === INPUT_SIZE && !viewOnly && owner === ws) {
         const r = parseRecord(data, HEADER_SIZE);
         if (!validate(r)) input.stream(r);

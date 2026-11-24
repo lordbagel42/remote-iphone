@@ -10,7 +10,7 @@ kill_all() { for n in "iphone.py serve" fake-wda.py fake-mjpeg.py fake-screenstr
 kill_all
 mkdir -p $T
 ffmpeg -v error -y -f lavfi -i testsrc2=size=750x1334:rate=60 -t 4 -c:v libx264 -profile:v baseline -pix_fmt yuv420p \
-  -x264-params aud=1:keyint=60 -f h264 $T/stream.h264
+  -x264-params aud=1:keyint=600 -f h264 $T/stream.h264  # one keyframe, like ScreenStream's 10 s
 (FAKE_IP=127.0.0.1 uv run -q --with pillow python $B/fake-wda.py 18100 >/tmp/fw.log 2>&1 &)
 (uv run -q --with pillow python $B/fake-mjpeg.py 19100 375 667 >/tmp/fm.log 2>&1 &)
 (IPHONE_API_TOKEN=$TOKEN WDA_URL=http://127.0.0.1:18100 WDA_MJPEG_PORT=19100 host/iphone.py serve --port 18200 >/tmp/serve-ss.log 2>&1 &)
@@ -35,6 +35,26 @@ echo "== 1. ScreenStream over USB (fake usbmuxd)"
 (python3 $B/fake-screenstream.py 18400 $T/stream.h264 >/tmp/fs.log 2>&1 &)
 relay; watch 3; grep "video:" $T/relay.log
 echo "metrics: $(curl -s 127.0.0.1:18300/metrics)"
+
+echo "== 1b. A viewer that stops acking for 1 s catches up with one requested keyframe, not a long freeze"
+(cd relay && node --input-type=module -e '
+  import { WebSocket } from "ws";
+  import { HEADER_SIZE, MESSAGE_TYPES, SUBPROTOCOL, header, parseHeader } from "screen-relay/protocol";
+  const ws = new WebSocket("ws://127.0.0.1:18300/stream?view=1", SUBPROTOCOL);
+  const t0 = Date.now(); let last = 0, n = 0, gaps = [], keys = 0;
+  ws.on("message", (d) => {
+    const h = parseHeader(d);
+    if (h.type !== MESSAGE_TYPES.frame) return;
+    const now = Date.now() - t0; n++;
+    if (d.readUInt16BE(6) & 1) keys++;
+    if (last && now - last > 100) gaps.push(`${now - last} ms at ${(last / 1000).toFixed(1)} s`);
+    last = now;
+    const paused = now > 2000 && now < 3000;  // no acks between 2 and 3 s
+    if (!paused) ws.send(Buffer.from(header(MESSAGE_TYPES.ack, h.generation, h.sequence, 0)));
+    else setTimeout(() => ws.send(Buffer.from(header(MESSAGE_TYPES.ack, h.generation, h.sequence, 0))), 3000 - now);
+  });
+  setTimeout(() => { console.log(`viewer: ${n} frames in 5 s, ${keys} keyframes, gaps over 100 ms: ${gaps.join(", ") || "none"}`); process.exit(0); }, 5000);')
+grep -c "keyframe requested" /tmp/fs.log | sed 's/^/keyframes requested from ScreenStream: /'
 
 echo "== 2. No usbmuxd: ScreenStream over Wi-Fi (the IP from WDA's status)"
 for p in $(pgrep -f fake-usbmuxd.py); do kill "$p"; done
