@@ -15,13 +15,19 @@
 //   RELAY_MJPEG_URL otherwise WDA's MJPEG stream, transcoded with ffmpeg (default http://127.0.0.1:9100)
 //   RELAY_SOURCE    a shell command that writes H.264 Annex B to stdout instead (with AUD NAL units)
 //   RELAY_FPS       frame rate reported to viewers (default 30)
+//   WDA_PORT        WDA's port on the phone, reached through usbmuxd for touches (default 8100)
+//   WDA_URL         WDA when the phone is not on USB (default: the URL `iphone.py up` saved in
+//                   $IPHONE_WDA_HOME/wda_url, else http://127.0.0.1:$WDA_PORT)
+//   RELAY_STUN      STUN servers for WebRTC viewers, comma-separated (default stun:stun.l.google.com:19302)
 
 import http from "node:http";
 import net from "node:net";
 import { spawn, type ChildProcess } from "node:child_process";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
+import { homedir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { WebSocketServer, WebSocket } from "ws";
+import { H264Packetizer, MediaStreamTrack, RTCPeerConnection, RTCRtpCodecParameters, useNACK, usePLI } from "werift";
 import { HEADER_SIZE, INPUT_SIZE, MAX_INPUT_BATCH, MESSAGE_TYPES, SUBPROTOCOL, header, parseHeader } from "screen-relay/protocol";
 
 const PORT = Number(process.env.RELAY_PORT ?? 8300);
@@ -31,6 +37,7 @@ const MJPEG_URL = process.env.RELAY_MJPEG_URL ?? "http://127.0.0.1:9100";
 const SOURCE = process.env.RELAY_SOURCE ?? "";
 const FPS = Number(process.env.RELAY_FPS ?? 30);
 const STREAM_PORT = Number(process.env.RELAY_STREAM_PORT ?? 8400);
+const WDA_PORT = Number(process.env.WDA_PORT ?? 8100);
 // A viewer whose oldest unacknowledged frame is older than this skips ahead to a fresh keyframe, which
 // ScreenStream encodes on request ("K"), so falling behind costs one frame instead of a long freeze.
 const MAX_LAG_MS = 400;
@@ -79,11 +86,158 @@ document.querySelectorAll("#iphone-buttons [data-press]").forEach((b) => b.addEv
 </script>
 </body>`;
 const viewerPage = Buffer.from(readFileSync(viewerDir + "index.html", "utf8").replace("</body>", PHONE_BUTTONS));
+// The WebRTC viewer: video and input peer to peer (see rtcViewer). It falls back to screen-relay's
+// WebSocket viewer (?ws=1) when no connection comes up, e.g. behind a network that blocks UDP.
+const RTC_PAGE = `<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>iPhone</title>
+<link rel="icon" href="data:,">
+<style>
+:root{color-scheme:dark}
+html,body{margin:0;height:100%;overflow:hidden;background:#000;font:13px/1.2 system-ui,-apple-system,"Segoe UI",sans-serif;color:#ededed}
+#stage{position:fixed;inset:0;display:flex}
+#screen{--w:750;--h:1334;display:block;margin:auto;background:#000;outline:none;touch-action:none;object-fit:fill;
+  width:min(100vw,calc(100dvh*var(--w)/var(--h)));height:min(100dvh,calc(100vw*var(--h)/var(--w)))}
+#bar{position:fixed;top:8px;left:50%;transform:translateX(-50%);z-index:3;display:flex;align-items:center;gap:8px;padding:6px 12px;
+  border-radius:999px;background:rgba(12,12,12,.86);border:1px solid rgba(255,255,255,.12);color:#a1a1a1;white-space:nowrap}
+#bar .dot{width:8px;height:8px;border-radius:50%;background:#f5a623}
+#bar.live .dot{background:#3fb950}#bar.error .dot{background:#f85149}
+#bar button,#bar a{padding:4px 8px;border:0;border-radius:999px;background:rgba(255,255,255,.1);color:#ededed;font:inherit;cursor:pointer;text-decoration:none}
+#bar button:hover,#bar a:hover{background:rgba(255,255,255,.2)}
+</style>
+</head>
+<body>
+<div id="stage"><video id="screen" tabindex="0" autoplay playsinline muted aria-label="iPhone screen"></video></div>
+<div id="bar" role="status"><span class="dot"></span><span id="status">Connecting…</span>
+  <button type="button" id="take" hidden>Take control</button><a href="?ws=1" id="fallback" hidden>WebSocket viewer</a></div>
+<script>
+const screenEl = document.getElementById("screen"), bar = document.getElementById("bar"), statusEl = document.getElementById("status");
+const takeBtn = document.getElementById("take"), fallback = document.getElementById("fallback");
+const viewOnly = new URLSearchParams(location.search).get("view") === "1";
+let ws = null, pc = null, dc = null, connected = false, retry = null;
+const say = (text, state) => { statusEl.textContent = text; bar.className = state || ""; };
+
+function start(take) {
+  clearTimeout(retry);
+  ws?.close(); pc?.close();
+  connected = false; dc = null; takeBtn.hidden = true;
+  say("Connecting…");
+  const q = viewOnly ? "?view=1" : take ? "?take=1" : "";
+  const sock = ws = new WebSocket((location.protocol === "https:" ? "wss://" : "ws://") + location.host + "/rtc" + q);
+  const peer = pc = new RTCPeerConnection({ iceServers: [{ urls: "stun:stun.l.google.com:19302" }] });
+  peer.ontrack = (e) => {
+    if ("jitterBufferTarget" in e.receiver) e.receiver.jitterBufferTarget = 0; // show frames as they arrive
+    screenEl.srcObject = new MediaStream([e.track]);
+  };
+  peer.ondatachannel = (e) => { dc = e.channel; };
+  peer.onconnectionstatechange = async () => {
+    if (pc !== peer) return;
+    if (peer.connectionState === "connected") {
+      connected = true;
+      let path = "";
+      for (const s of (await peer.getStats()).values())
+        if (s.type === "candidate-pair" && s.nominated && s.state === "succeeded") {
+          const local = (await peer.getStats()).get(s.localCandidateId);
+          path = local?.candidateType === "relay" ? " · via TURN" : local?.candidateType === "host" ? " · direct (LAN)" : " · direct";
+        }
+      say((viewOnly ? "Live · view only" : "Live · you have control") + path, "live");
+      fallback.hidden = true;
+    } else if (peer.connectionState === "failed") {
+      say("No direct connection to the phone", "error");
+      fallback.hidden = false;
+    }
+  };
+  sock.onmessage = async (m) => {
+    const { offer } = JSON.parse(m.data);
+    if (!offer) return;
+    await peer.setRemoteDescription(offer);
+    await peer.setLocalDescription(await peer.createAnswer());
+    // Send the answer with its candidates; STUN answers within ~100 ms, a blocked one is not waited for.
+    await new Promise((r) => {
+      if (peer.iceGatheringState === "complete") return r();
+      peer.addEventListener("icegatheringstatechange", () => peer.iceGatheringState === "complete" && r());
+      setTimeout(r, 1500);
+    });
+    sock.send(JSON.stringify({ answer: peer.localDescription }));
+  };
+  sock.onclose = (e) => {
+    if (ws !== sock) return;
+    peer.close();
+    if (e.code === 4003 || e.code === 4001) {
+      say(e.code === 4001 ? "Another viewer took control" : "Another viewer has control", "error");
+      takeBtn.hidden = false;
+      return;
+    }
+    say("Reconnecting…", "error");
+    retry = setTimeout(() => start(false), 2000);
+  };
+  // No connection in 10 s (UDP blocked, say): offer the WebSocket viewer.
+  setTimeout(() => { if (pc === peer && !connected) { say("No direct connection yet", "error"); fallback.hidden = false; } }, 10000);
+}
+takeBtn.onclick = () => start(true);
+if (viewOnly) fallback.href = "?ws=1&view=1";
+for (const ev of ["loadedmetadata", "resize"]) screenEl.addEventListener(ev, () => {
+  screenEl.style.setProperty("--w", screenEl.videoWidth);
+  screenEl.style.setProperty("--h", screenEl.videoHeight);
+});
+
+// Input: screen-relay input records (type, code, value, x, y in 0..1, modifiers) on the data channel.
+function send(type, code = 0, value = 0, x = 0, y = 0) {
+  if (!viewOnly && dc?.readyState === "open") dc.send(JSON.stringify({ type, code, value, x, y, modifiers: 0 }));
+}
+function at(e) {
+  const r = screenEl.getBoundingClientRect();
+  return [Math.min(1, Math.max(0, (e.clientX - r.left) / r.width)), Math.min(1, Math.max(0, (e.clientY - r.top) / r.height))];
+}
+let down = false;
+screenEl.addEventListener("pointerdown", (e) => {
+  if (e.button !== 0) return;
+  screenEl.focus();
+  screenEl.setPointerCapture(e.pointerId);
+  down = true;
+  send(4, 1, 0, ...at(e));
+  e.preventDefault();
+});
+screenEl.addEventListener("pointermove", (e) => { if (down) send(3, 0, 0, ...at(e)); });
+screenEl.addEventListener("pointerup", (e) => { if (down) { down = false; send(5, 1, 0, ...at(e)); } });
+screenEl.addEventListener("pointercancel", () => { if (down) { down = false; send(7); } });
+screenEl.addEventListener("contextmenu", (e) => e.preventDefault());
+let wheel = [0, 0];
+screenEl.addEventListener("wheel", (e) => {
+  e.preventDefault();
+  const scale = e.deltaMode === 1 ? 40 : e.deltaMode === 2 ? 400 : 1;
+  wheel[0] += e.deltaY * scale; wheel[1] += e.deltaX * scale;
+  for (const axis of [0, 1]) {
+    const notches = Math.trunc(wheel[axis] / 100);
+    if (!notches) continue;
+    wheel[axis] -= notches * 100;
+    send(6, axis, Math.max(-10, Math.min(10, notches)) * 120, ...at(e));
+  }
+}, { passive: false });
+const KEYS = { Enter: 40, Backspace: 42, Tab: 43, Home: 74 };
+document.addEventListener("keydown", (e) => {
+  if (e.target instanceof HTMLInputElement || e.target instanceof HTMLButtonElement || e.target instanceof HTMLAnchorElement) return;
+  if (e.ctrlKey || e.metaKey || e.altKey) return;
+  if (e.key in KEYS) send(1, KEYS[e.key]);
+  else if ([...e.key].length === 1) send(8, 0, e.key.codePointAt(0));
+  else return;
+  e.preventDefault();
+});
+document.addEventListener("paste", (e) => {
+  for (const ch of e.clipboardData?.getData("text") ?? "") send(8, 0, ch.codePointAt(0));
+});
+start(false);
+</script>
+${PHONE_BUTTONS}
+</html>`;
 const VIEWER: Record<string, [string, Buffer]> = {
   "/": ["text/html; charset=utf-8", viewerPage],
   "/index.html": ["text/html; charset=utf-8", viewerPage],
   "/viewer.js": ["text/javascript; charset=utf-8", readFileSync(viewerDir + "viewer.js")],
 };
+const rtcPage = Buffer.from(RTC_PAGE);
 
 // ------------------------------------------------------------------------------------------ video
 
@@ -441,6 +595,50 @@ async function phoneIp(): Promise<string | null> {
   }
 }
 
+/** A request to WDA itself, not through `iphone.py serve`: over USB through usbmuxd when the phone is
+ * plugged in, else at WDA_URL (`iphone.py up`'s forwarder). serve takes one request at a time, so a
+ * viewer's touch would otherwise wait behind an agent's screenshot or UI tree. */
+function wda(path: string, body: unknown): Promise<unknown> {
+  const data = Buffer.from(JSON.stringify(body));
+  const send = (opts: http.RequestOptions) =>
+    new Promise<unknown>((resolve, reject) => {
+      let connected = false;
+      const req = http.request(
+        { ...opts, path, method: "POST", headers: { "Content-Type": "application/json", "Content-Length": data.length }, timeout: 10_000 },
+        (res) => {
+          const chunks: Buffer[] = [];
+          res.on("data", (c: Buffer) => chunks.push(c));
+          res.on("close", () => {
+            if (!res.complete) return reject(new Error("WDA closed the connection mid-answer"));
+            let value: { error?: string; message?: string } | undefined;
+            try {
+              value = (JSON.parse(Buffer.concat(chunks).toString() || "{}") as { value?: typeof value }).value;
+            } catch {
+              return reject(new PhoneError(502, `not WDA: HTTP ${res.statusCode}`));
+            }
+            if (res.statusCode! >= 400 || value?.error) reject(new PhoneError(502, `${value?.error ?? res.statusCode}: ${value?.message ?? ""}`));
+            else resolve(value);
+          });
+        },
+      );
+      req.on("socket", (s) => (s.connecting ? s.once("connect", () => (connected = true)) : (connected = true)));
+      req.on("error", (e) => reject(Object.assign(e, { unreachable: !connected })));
+      req.on("timeout", () => req.destroy(new Error("WDA timed out")));
+      req.end(data);
+    });
+  let usb = false;
+  return send({
+    createConnection: ((_: unknown, done: (e: Error | null, s?: net.Socket) => void) => {
+      usbmuxConnect(WDA_PORT).then((s) => ((usb = true), s.resume(), done(null, s)), (e) => done(e));
+    }) as http.RequestOptions["createConnection"],
+  }).catch((e) => {
+    if (usb) throw e; // sent over USB already; sending it again could touch twice
+    const saved = `${process.env.IPHONE_WDA_HOME ?? homedir() + "/.iphone-wda"}/wda_url`;
+    const url = new URL(process.env.WDA_URL || (existsSync(saved) ? readFileSync(saved, "utf8").trim() : `http://127.0.0.1:${WDA_PORT}`));
+    return send({ host: url.hostname.replace(/^\[|\]$/g, ""), port: url.port });
+  });
+}
+
 let points: { width: number; height: number } | null = null; // the screen in points, which WDA's taps use
 async function screen(): Promise<{ width: number; height: number }> {
   points ??= ((await (await api("/window")).json()) as { value: { width: number; height: number } }).value;
@@ -494,6 +692,7 @@ class Input {
     this.flushText();
     this.flushWheel();
     await Promise.all(actions);
+    await this.settle(); // answer once the touches are done, so a screenshot after it shows them
   }
 
   /** For live viewers, which send one record per message: typing and wheel turns are gathered for
@@ -557,7 +756,7 @@ class Input {
         this.text += String.fromCodePoint(r.value);
         break;
       case 1:
-        if (r.code === HOME_KEY) this.run(() => api("/press", { button: "home" }));
+        if (r.code === HOME_KEY) this.run(async () => (await this.settle(), api("/press", { button: "home" })));
         else if (r.code in US) this.text += US[r.code][r.modifiers & SHIFT ? 1 : 0];
         break;
     }
@@ -567,7 +766,7 @@ class Input {
     if (!this.text) return;
     const text = this.text;
     this.text = "";
-    this.run(() => api("/type", { text }));
+    this.run(() => api("/type", { text })); // WDA queues typing behind the touches before it
   }
 
   private flushWheel(): void {
@@ -581,7 +780,7 @@ class Input {
       const from = { x: x * s.width, y: y * s.height };
       const to = { x: clamp(from.x - dx * step, s.width), y: clamp(from.y - dy * step, s.height) };
       // A slow drag that pauses before lifting scrolls by the distance moved, without momentum.
-      await api("/gesture", { points: [[from.x, from.y, 0], [to.x, to.y, 250], [to.x, to.y, 350]] });
+      await this.send([[from.x, from.y, 0], [to.x, to.y, 250], [to.x, to.y, 350]]);
     });
   }
 
@@ -592,13 +791,40 @@ class Input {
     const [x0, y0] = pts[0];
     const far = Math.max(...pts.map(([x, y]) => Math.hypot(x - x0, y - y0)));
     const held = pts[pts.length - 1][2];
-    if (far < 8 && held < 500) {
-      await api("/tap", { x: x0, y: y0, fast: true });
-      return;
-    }
+    // A short hold: SpringBoard and most controls act when the finger lifts.
+    if (far < 8 && held < 500) return this.send([[x0, y0, 0], [x0, y0, 40]]);
     // Keep at most 24 points of the path, always the first and the last.
-    const keep = pts.filter((_, i) => i === 0 || i === pts.length - 1 || i % Math.ceil(pts.length / 24) === 0);
-    await api("/gesture", { points: keep });
+    return this.send(pts.filter((_, i) => i === 0 || i === pts.length - 1 || i % Math.ceil(pts.length / 24) === 0));
+  }
+
+  /** WDA performs one gesture at a time and is busy for about 250 ms after each finger lifts. Touches go
+   * to its queue at once ("wait": false), which sends them as soon as it can and queues typing behind
+   * them; the hardware buttons, which bypass that queue, wait until the touches before them should be done. */
+  private busyUntil = 0;
+  private lastSent = 0;
+  private direct = true; // false for a WDA without the queue (no /wda/touch): through serve instead
+  private async send(points: number[][]): Promise<void> {
+    // WDA merges touches that queue up and keeps up to 400 ms of the gaps between them.
+    const now = performance.now();
+    const after = this.busyUntil > now ? this.busyUntil + Math.min(now - this.lastSent, 400) : now;
+    this.busyUntil = after + points[points.length - 1][2] + 260;
+    this.lastSent = now;
+    if (this.direct) {
+      try {
+        return void (await wda("/wda/touch", { points, wait: false }));
+      } catch (e) {
+        const err = e as Error & { unreachable?: boolean };
+        if (/unknown command/.test(err.message)) this.direct = false;
+        else if (!err.unreachable) throw e;
+        // WDA did not get it: serve may still reach WDA (e.g. at a URL only it knows).
+      }
+    }
+    await api("/gesture", { points });
+  }
+
+  private async settle(): Promise<void> {
+    const wait = this.busyUntil - performance.now();
+    if (wait > 0) await new Promise((r) => setTimeout(r, wait));
   }
 }
 
@@ -607,16 +833,23 @@ const input = new Input();
 // ------------------------------------------------------------------------------------------ connections
 
 let generation = 0;
-let owner: WebSocket | null = null; // one input owner: a /stream viewer without ?view=1, or /control
+// One input owner: a /stream viewer without ?view=1, /control, or a WebRTC viewer (/rtc).
+type Controller = { open: () => boolean; kick: () => void };
+let owner: Controller | null = null;
 
-function takeInput(ws: WebSocket, take: boolean): boolean {
-  if (owner && owner.readyState === WebSocket.OPEN) {
+function takeInput(c: Controller, take: boolean): boolean {
+  if (owner && owner !== c && owner.open()) {
     if (!take) return false;
-    owner.close(4001, "control taken");
+    owner.kick();
   }
-  owner = ws;
-  ws.on("close", () => owner === ws && (owner = null));
+  owner = c;
   return true;
+}
+
+function wsController(ws: WebSocket): Controller {
+  const c = { open: () => ws.readyState === WebSocket.OPEN, kick: () => ws.close(4001, "control taken") };
+  ws.on("close", () => owner === c && (owner = null));
+  return c;
 }
 
 function frameMessage(gen: number, seq: number, f: Frame): Buffer {
@@ -630,7 +863,8 @@ function frameMessage(gen: number, seq: number, f: Frame): Buffer {
 }
 
 function streamViewer(ws: WebSocket, viewOnly: boolean, take: boolean): void {
-  if (!viewOnly && !takeInput(ws, take)) return ws.close(4003, "input is owned by another client");
+  const me = wsController(ws);
+  if (!viewOnly && !takeInput(me, take)) return ws.close(4003, "input is owned by another client");
   const gen = ++generation;
   let seq = 0;
   let needKey = true;
@@ -660,7 +894,7 @@ function streamViewer(ws: WebSocket, viewOnly: boolean, take: boolean): void {
       if (h.type === MESSAGE_TYPES.ack) {
         while (unacked.length && unacked[0].seq <= h.sequence) unacked.shift();
         if (needKey && !behind()) video.requestKey();
-      } else if (h.type === MESSAGE_TYPES.input && h.payloadLength === INPUT_SIZE && !viewOnly && owner === ws) {
+      } else if (h.type === MESSAGE_TYPES.input && h.payloadLength === INPUT_SIZE && !viewOnly && owner === me) {
         const r = parseRecord(data, HEADER_SIZE);
         if (!validate(r)) input.stream(r);
       } else if (h.type !== MESSAGE_TYPES.input) throw new Error(`unexpected message type ${h.type}`);
@@ -672,7 +906,7 @@ function streamViewer(ws: WebSocket, viewOnly: boolean, take: boolean): void {
 }
 
 async function controlClient(ws: WebSocket, take: boolean): Promise<void> {
-  if (!takeInput(ws, take)) return ws.close(4003, "input is owned by another client");
+  if (!takeInput(wsController(ws), take)) return ws.close(4003, "input is owned by another client");
   const gen = ++generation;
   try {
     await screen();
@@ -705,6 +939,93 @@ async function controlClient(ws: WebSocket, take: boolean): Promise<void> {
   });
 }
 
+// ------------------------------------------------------------------------------------------ WebRTC
+
+const ICE_SERVERS = (process.env.RELAY_STUN ?? "stun:stun.l.google.com:19302").split(",").filter(Boolean).map((urls) => ({ urls }));
+
+/**
+ * A WebRTC viewer: the page signals over the /rtc WebSocket (through serve, so behind the login), then
+ * video and input go peer to peer over UDP instead of through the Cloudflare tunnel, where one slow TCP
+ * segment holds up every frame behind it. ScreenStream's frames are sent as they come, without
+ * re-encoding; a lost frame costs a keyframe, which the browser asks for (PLI) and ScreenStream encodes
+ * at once. Input arrives on the "input" data channel as screen-relay input records in JSON.
+ *
+ * Messages on the WebSocket: relay -> page {offer}, page -> relay {answer}; the relay closes it with
+ * 4001 when another viewer takes control and 4003 when another one has it and this one did not take it.
+ */
+async function rtcViewer(ws: WebSocket, viewOnly: boolean, take: boolean): Promise<void> {
+  const me = wsController(ws);
+  if (!viewOnly && !takeInput(me, take)) return ws.close(4003, "input is owned by another client");
+  const pc = new RTCPeerConnection({
+    iceServers: ICE_SERVERS,
+    codecs: {
+      video: [
+        new RTCRtpCodecParameters({
+          mimeType: "video/H264",
+          clockRate: 90000,
+          rtcpFeedback: [useNACK(), usePLI()],
+          parameters: "profile-level-id=42e01f;packetization-mode=1;level-asymmetry-allowed=1",
+        }),
+      ],
+    },
+  });
+  const track = new MediaStreamTrack({ kind: "video" });
+  const { sender } = pc.addTransceiver(track, { direction: "sendonly" });
+  const channel = pc.createDataChannel("input");
+  const packetizer = new H264Packetizer({ inputFormat: "annexb" });
+  let live = false, needKey = true, unwatch = () => {};
+  const send = (f: Frame) => {
+    if (!live) return;
+    if (needKey && !f.key) return video.requestKey();
+    needKey = false;
+    // Drop the access unit delimiter; RTP marks frame boundaries itself.
+    const [, after] = nalStarts(f.data, 0).next().value ?? [0, 0];
+    const au = (f.data[after] & 31) === 9 ? f.data.subarray(nalStarts(f.data, after).next().value?.[0] ?? 0) : f.data;
+    for (const packet of packetizer.packetize(au, Number((f.time * 9n) / 100n) >>> 0)) track.writeRtp(packet);
+  };
+  sender.onPictureLossIndication.subscribe(() => ((needKey = true), video.requestKey()));
+  pc.connectionStateChange.subscribe((state) => {
+    log(`webrtc: ${state}`);
+    if (state === "connected" && !live) {
+      live = true;
+      video.requestKey();
+      unwatch = video.watch(send);
+    }
+    if (state === "failed" || state === "closed") ws.close(1011, "webrtc " + state);
+  });
+  channel.onMessage.subscribe((data) => {
+    if (viewOnly || owner !== me) return;
+    try {
+      const r = JSON.parse(String(data)) as Record16;
+      const fields = ["type", "code", "value", "x", "y", "modifiers"] as const;
+      if (fields.some((k) => typeof r[k] !== "number" || !Number.isFinite(r[k]))) return;
+      r.x = Math.min(1, Math.max(0, r.x));
+      r.y = Math.min(1, Math.max(0, r.y));
+      if (!validate(r)) input.stream(r);
+    } catch {
+      // not an input record
+    }
+  });
+  // Nothing else crosses this WebSocket once connected, and Cloudflare closes idle ones after 100 s.
+  const keepalive = setInterval(() => ws.ping(), 30_000);
+  ws.on("close", () => {
+    clearInterval(keepalive);
+    live = false;
+    unwatch();
+    void pc.close();
+  });
+  ws.on("message", async (data: Buffer) => {
+    try {
+      const msg = JSON.parse(String(data)) as { answer?: { type: "answer"; sdp: string } };
+      if (msg.answer) await pc.setRemoteDescription(msg.answer);
+    } catch (e) {
+      ws.close(1002, (e as Error).message.slice(0, 100));
+    }
+  });
+  await pc.setLocalDescription(await pc.createOffer());
+  if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ offer: pc.localDescription }));
+}
+
 // ------------------------------------------------------------------------------------------ HTTP
 
 function json(res: http.ServerResponse, status: number, body: unknown): void {
@@ -714,8 +1035,9 @@ function json(res: http.ServerResponse, status: number, body: unknown): void {
 }
 
 async function handle(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
-  const path = (req.url ?? "/").split("?")[0];
-  const viewer = VIEWER[path];
+  const [path, query = ""] = (req.url ?? "/").split("?");
+  // The page is the WebRTC viewer; screen-relay's WebSocket viewer stays at ?ws=1.
+  const viewer = path === "/" && !query.split("&").includes("ws=1") ? (["text/html; charset=utf-8", rtcPage] as const) : VIEWER[path];
   if (req.method === "GET" && viewer) {
     res.writeHead(200, {
       "Content-Type": viewer[0],
@@ -767,7 +1089,7 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse): Prom
     }
   }
   if (req.method === "POST" && path === "/input") {
-    if (owner && owner.readyState === WebSocket.OPEN) return json(res, 409, { error: "busy", applied: 0 });
+    if (owner && owner.open()) return json(res, 409, { error: "busy", applied: 0 });
     const length = Number(req.headers["content-length"]);
     if (!Number.isInteger(length)) return json(res, 411, { error: "length_required" });
     if (length > MAX_INPUT_BATCH * INPUT_SIZE) return json(res, 413, { error: "too_large" });
@@ -808,8 +1130,17 @@ const wss = new WebSocketServer({
   maxPayload: HEADER_SIZE + INPUT_SIZE,
   handleProtocols: (protocols) => (protocols.has(SUBPROTOCOL) ? SUBPROTOCOL : false),
 });
+const rtcWss = new WebSocketServer({ noServer: true, maxPayload: 64 << 10 });
 server.on("upgrade", (req, socket, head) => {
   const url = new URL(req.url ?? "/", "http://relay");
+  if (url.pathname === "/rtc") {
+    return rtcWss.handleUpgrade(req, socket, head, (ws) => {
+      rtcViewer(ws, url.searchParams.get("view") === "1", url.searchParams.get("take") === "1").catch((e) => {
+        log(`webrtc: ${e.stack ?? e}`);
+        ws.close(1011, "webrtc setup failed");
+      });
+    });
+  }
   if (url.pathname !== "/stream" && url.pathname !== "/control") return socket.destroy();
   wss.handleUpgrade(req, socket, head, (ws) => {
     if (ws.protocol !== SUBPROTOCOL) return ws.close(1002, "nsl1 subprotocol required");

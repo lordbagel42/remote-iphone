@@ -394,6 +394,7 @@ def stop(proc: subprocess.Popen) -> None:
 # Paths `serve` forwards to the screen-relay engine for the iPhone (relay/relay.ts).
 RELAY_PATHS = {
     "/relay",
+    "/rtc",
     "/viewer.js",
     "/stream",
     "/control",

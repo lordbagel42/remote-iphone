@@ -10,6 +10,7 @@
   },
   "dependencies": {
     "screen-relay": "0.1.5",
+    "werift": "^0.28.0",
     "ws": "^8.18.0"
   },
   "devDependencies": {
