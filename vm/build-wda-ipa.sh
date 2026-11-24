@@ -5,6 +5,7 @@
 #   ./build-wda-ipa.sh            # device IPA -> dist/WebDriverAgentRunner.ipa
 #   SIM=1 ./build-wda-ipa.sh      # also build for the iOS Simulator (dist/WebDriverAgentRunner-sim.zip)
 set -euo pipefail
+HERE="$(cd "$(dirname "$0")" && pwd)"
 
 WDA_REF="${WDA_REF:-v16.15.3}"                   # appium/WebDriverAgent release tag
 XCODE="${XCODE:-/Applications/Xcode_16.4.app}"   # Xcode 16.4 = iOS 18.5 SDK, the closest match to iOS 18.3.1
@@ -18,7 +19,10 @@ if [ ! -d "$WORK/src" ]; then
   git clone --quiet --depth 1 --branch "$WDA_REF" https://github.com/appium/WebDriverAgent.git "$WORK/src"
 fi
 cd "$WORK/src"
-echo "WDA $(git rev-parse HEAD) ($WDA_REF), $(xcodebuild -version | tr '\n' ' ')"
+# Our WDA changes: POST /wda/doublePressHome (the app switcher on Home-button iPhones).
+git apply --check "$HERE/wda-double-press-home.patch" 2>/dev/null && git apply "$HERE/wda-double-press-home.patch"
+git diff --quiet && { echo "wda-double-press-home.patch did not apply" >&2; exit 1; }
+echo "WDA $(git rev-parse HEAD) ($WDA_REF) + patches, $(xcodebuild -version | tr '\n' ' ')"
 
 # Same flags as appium's own real-device CI build (Scripts/ci/build-real.sh): unsigned, arm64 only.
 xcodebuild clean build-for-testing \
