@@ -140,7 +140,7 @@ export default defineApp(requirements, {
       tap: mutation(
         {
           description:
-            "Tap at screen-point coordinates (x and y), or tap the element whose label, name or value is exactly text.",
+            "Tap at screen-point coordinates (x and y), or tap the element whose label, name or value is exactly text. When no element matches, returns tapped: false and nothing was touched; look at ui_tree again.",
           input: object({
             x: number().optional(),
             y: number().optional(),
@@ -149,7 +149,15 @@ export default defineApp(requirements, {
           output: json(),
         },
         async (ctx, { x, y, text }) => {
-          if (text !== undefined) return value(ctx, "POST", "/tap", { text });
+          if (text !== undefined) {
+            try {
+              return { tapped: true, ...((await value(ctx, "POST", "/tap", { text })) as object) };
+            } catch (e) {
+              // A definite miss: the lookup failed before any touch, so report it as a result, not an unknown-outcome error.
+              if (!String(e).includes("no such element")) throw e;
+              return { tapped: false, error: `No element on screen has the exact label, name or value ${JSON.stringify(text)}; nothing was tapped.` };
+            }
+          }
           if (x === undefined || y === undefined) throw new Error("Pass x and y, or text.");
           await value(ctx, "POST", "/tap", { x, y });
           return done;
@@ -200,14 +208,15 @@ export default defineApp(requirements, {
       launch_app: mutation(
         {
           description:
-            "Open an app by bundle ID, such as com.apple.Preferences or com.apple.mobilesafari. restart relaunches it from scratch.",
-          input: object({ bundle_id: string({ minLength: 1 }), restart: boolean().default(false) }),
-          output: Ok,
+            "Open an app by bundle ID, such as com.apple.Preferences or com.apple.mobilesafari. restart relaunches it from scratch. By default it returns once the screen stops changing (up to about 4 s), so the next ui_tree shows the app or an alert it raised; settled: false means the screen was still changing.",
+          input: object({
+            bundle_id: string({ minLength: 1 }),
+            restart: boolean().default(false),
+            wait: boolean({ description: "Wait for the screen to settle" }).default(true),
+          }),
+          output: object({ active_app: string().optional(), settled: boolean().optional() }),
         },
-        async (ctx, input) => {
-          await value(ctx, "POST", "/launch", input);
-          return done;
-        },
+        async (ctx, input) => ((await value(ctx, "POST", "/launch", input)) ?? {}) as { active_app?: string; settled?: boolean },
       ),
       start_recording: mutation(
         {

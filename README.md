@@ -113,7 +113,7 @@ MCP tools (and the same CLI subcommands):
 | `swipe` | `swipe X1 Y1 X2 Y2 [--duration s]` | Scroll down = swipe upward; the finger moves for `duration` (0.1–0.3 s flicks) |
 | `type_text` | `type "text"` | Into the focused field; `\n` for return |
 | `press_button` | `press home\|volumeup\|volumedown\|lock\|unlock` | |
-| `launch_app` | `launch BUNDLE_ID [--restart]` | e.g. `com.apple.Preferences`, `com.apple.mobilesafari` |
+| `launch_app` | `launch BUNDLE_ID [--restart]` | e.g. `com.apple.Preferences`; returns once the screen stops changing (`wait`, up to ~4 s) |
 | `go_home` | `home` | |
 | `status` | `status` | WDA status and the frontmost app |
 | `start_recording` / `stop_recording` | | Screen video as an MP4 (needs ffmpeg); stop returns its local path |
@@ -137,7 +137,7 @@ It needs `IPHONE_API_TOKEN` (32+ characters) and `IPHONE_PUBLIC_URL`, and talks 
 | `POST /swipe` | `{from_x, from_y, to_x, to_y, duration?}` | |
 | `POST /type` | `{text}` | |
 | `POST /press` | `{button}` | home, volumeup, volumedown, lock, unlock |
-| `POST /launch` | `{bundle_id, restart?}` | |
+| `POST /launch` | `{bundle_id, restart?, wait?}` | `{active_app, settled}`; waits (default) until the accessibility tree stops changing, up to ~4 s |
 | `POST /home` | | |
 | `POST /recording/start` | `{max_seconds?}` (default 300, at most 1800) | starts recording the screen; 422 if one is running |
 | `POST /recording/stop` | | `{url, seconds, bytes, expires_in}`: an unauthenticated MP4 link valid 1 hour |

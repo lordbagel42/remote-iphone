@@ -179,8 +179,19 @@ class WDA:
     def home(self) -> None:
         self.req("POST", "/wda/homescreen")
 
-    def launch(self, bundle_id: str, restart: bool = False) -> None:
+    def launch(self, bundle_id: str, restart: bool = False, wait: bool = True) -> dict:
+        """Opens the app. With wait, returns once its accessibility tree stops changing (at most about 4 s),
+        so the next look shows the app, or an alert it raised, instead of the screen before it."""
         self.s("POST", "/wda/apps/launch" if restart else "/wda/apps/activate", {"bundleId": bundle_id})
+        settled, prev, deadline = False, None, time.time() + 4
+        while wait and time.time() < deadline:
+            time.sleep(0.3)
+            tree = self.source()
+            if tree == prev:
+                settled = True
+                break
+            prev = tree
+        return {"active_app": self.active_app().get("bundleId"), "settled": settled if wait else None}
 
     def active_app(self) -> dict:
         return self.req("GET", "/wda/activeAppInfo")
@@ -903,7 +914,9 @@ def cmd_serve(args) -> None:
         elif path == "/press":
             wda.press(str(body["button"]))
         elif path == "/launch":
-            wda.launch(str(body["bundle_id"]), bool(body.get("restart", False)))
+            return ok(
+                wda.launch(str(body["bundle_id"]), bool(body.get("restart", False)), bool(body.get("wait", True)))
+            )
         elif path == "/home":
             wda.home()
         else:
@@ -1146,10 +1159,10 @@ def cmd_mcp(_args) -> None:
         return "ok"
 
     @m.tool()
-    def launch_app(bundle_id: str, restart: bool = False) -> str:
-        """Open an app by bundle ID (e.g. com.apple.Preferences, com.apple.mobilesafari). restart=True relaunches it."""
-        wda.launch(bundle_id, restart)
-        return "ok"
+    def launch_app(bundle_id: str, restart: bool = False, wait: bool = True) -> str:
+        """Open an app by bundle ID (e.g. com.apple.Preferences, com.apple.mobilesafari). restart=True relaunches it.
+        wait=True returns once the screen stops changing (up to ~4 s); settled=false means it was still changing."""
+        return json.dumps(wda.launch(bundle_id, restart, wait))
 
     recorder = Recorder((urlsplit(wda.url).hostname, int(os.environ.get("WDA_MJPEG_PORT", MJPEG_PORT))))
 
@@ -1246,7 +1259,7 @@ def main() -> None:
         elif args.cmd == "press":
             wda.press(args.button)
         elif args.cmd == "launch":
-            wda.launch(args.bundle_id, args.restart)
+            print(json.dumps(wda.launch(args.bundle_id, args.restart)))
         elif args.cmd == "home":
             wda.home()
     except WDAError as e:
