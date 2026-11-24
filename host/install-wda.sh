@@ -3,6 +3,7 @@
 # and installs it on the iPhone. Re-run every 7 days with a free account. No Xcode needed.
 #
 #   ./install-wda.sh [path/to/WebDriverAgentRunner.ipa]
+#   ./install-wda.sh dist/ScreenStream.ipa dev.raygen.ScreenStream   # the same for ScreenStream
 #
 # Plug the iPhone in by USB first.
 set -euo pipefail
@@ -12,7 +13,7 @@ IPA="${1:-$HERE/../dist/WebDriverAgentRunner.ipa}"
 PLUMESIGN="${PLUMESIGN:-$HERE/../dist/plumesign}"
 UDID="${IPHONE_UDID:-00008110-000870C036EB801E}"
 # App IDs on free accounts must be globally unique; keep the .xctrunner suffix XCTest runners use.
-BUNDLE_ID="${WDA_BUNDLE_ID:-dev.raygen.WebDriverAgentRunner.xctrunner}"
+BUNDLE_ID="${2:-${WDA_BUNDLE_ID:-dev.raygen.WebDriverAgentRunner.xctrunner}}"
 
 xattr -d com.apple.quarantine "$PLUMESIGN" 2>/dev/null || true
 # plumesign shares ~/.config/PlumeImpactor with Impactor.app, so it reuses that login and certificate.
@@ -36,9 +37,9 @@ EOF
 
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
-cp "$IPA" "$TMP/WebDriverAgentRunner.ipa"  # signing rewrites the package; keep the original unsigned
+cp "$IPA" "$TMP/app.ipa"  # signing rewrites the package; keep the original unsigned
 "$PLUMESIGN" sign --apple-id --register-and-install --udid "$DEVID" \
-  --custom-identifier "$BUNDLE_ID" -p "$TMP/WebDriverAgentRunner.ipa"
+  --custom-identifier "$BUNDLE_ID" -p "$TMP/app.ipa"
 
 echo "Installed $BUNDLE_ID. First install only: on the iPhone open Settings > General > VPN & Device"
 echo "Management, tap your Apple Account under Developer App, and tap Trust."

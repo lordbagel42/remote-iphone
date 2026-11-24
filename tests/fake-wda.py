@@ -1,5 +1,5 @@
 # Minimal fake WebDriverAgent for testing iphone.py serve/up --listen without a phone.
-import base64, io, json, sys
+import base64, io, json, os, sys
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from PIL import Image
 
@@ -19,7 +19,7 @@ class H(BaseHTTPRequestHandler):
 
     def do_GET(self):
         p = self.path
-        if p == "/status": return self.reply({"ready": True, "ios": {"ip": "10.9.9.9"}})
+        if p == "/status": return self.reply({"ready": True, "ios": {"ip": os.environ.get("FAKE_IP", "10.9.9.9")}})
         if p == "/window/size": return self.reply({"width": 375, "height": 667})
         if p == "/screenshot": return self.reply(PNG)
         if p.startswith("/source"): return self.reply(TREE)

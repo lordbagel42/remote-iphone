@@ -8,11 +8,16 @@
 //   RELAY_PORT      port on 127.0.0.1 (default 8300)
 //   IPHONE_API      `iphone.py serve` origin (default http://127.0.0.1:8200)
 //   IPHONE_API_TOKEN  its bearer token
-//   RELAY_MJPEG_URL WDA's MJPEG stream, transcoded with ffmpeg (default http://127.0.0.1:9100)
+//   RELAY_STREAM_PORT the ScreenStream broadcast extension's port on the phone (default 8400): hardware
+//                   H.264 straight from the phone, over USB through usbmuxd when the phone is plugged in,
+//                   else from its Wi-Fi IP. Used whenever it answers.
+//   IPHONE_UDID     the phone, for usbmuxd (default 00008110-000870C036EB801E)
+//   RELAY_MJPEG_URL otherwise WDA's MJPEG stream, transcoded with ffmpeg (default http://127.0.0.1:9100)
 //   RELAY_SOURCE    a shell command that writes H.264 Annex B to stdout instead (with AUD NAL units)
 //   RELAY_FPS       frame rate reported to viewers (default 30)
 
 import http from "node:http";
+import net from "node:net";
 import { spawn, type ChildProcess } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
@@ -25,6 +30,7 @@ const TOKEN = process.env.IPHONE_API_TOKEN ?? "";
 const MJPEG_URL = process.env.RELAY_MJPEG_URL ?? "http://127.0.0.1:9100";
 const SOURCE = process.env.RELAY_SOURCE ?? "";
 const FPS = Number(process.env.RELAY_FPS ?? 30);
+const STREAM_PORT = Number(process.env.RELAY_STREAM_PORT ?? 8400);
 const MAX_UNACKED = Math.max(4, Math.round(FPS / 2)); // half a second of frames; beyond that skip to the next keyframe
 const MAX_UNACKED_BYTES = 8 << 20;
 
@@ -161,6 +167,8 @@ class Video {
   frames = 0;
   bytes = 0;
   private proc: ChildProcess | null = null;
+  private sock: net.Socket | null = null;
+  private starting = false;
   private buf: Buffer = Buffer.alloc(0);
   private idleTimer: NodeJS.Timeout | null = null;
   private restartTimer: NodeJS.Timeout | null = null;
@@ -171,14 +179,45 @@ class Video {
     this.sinks.add(sink);
     if (this.idleTimer) clearTimeout(this.idleTimer);
     this.idleTimer = null;
-    if (!this.proc && !this.restartTimer) this.start();
+    if (!this.proc && !this.sock && !this.starting && !this.restartTimer) this.start();
     return () => {
       this.sinks.delete(sink);
       if (!this.sinks.size) this.idleTimer = setTimeout(() => this.stop(), 30_000);
     };
   }
 
+  /** ScreenStream on the phone when it answers, else the MJPEG transcoder (or RELAY_SOURCE). */
   private start(): void {
+    if (SOURCE) return this.spawn();
+    this.starting = true;
+    connectStream()
+      .then(({ sock, via }) => this.attach(sock, via))
+      .catch(() => {
+        this.starting = false;
+        if (this.sinks.size) this.spawn(); // not broadcasting: WDA's MJPEG
+      });
+  }
+
+  private attach(sock: net.Socket, via: string): void {
+    this.starting = false;
+    if (!this.sinks.size) return void sock.destroy();
+    sock.setNoDelay(true);
+    this.sock = sock;
+    this.buf = Buffer.alloc(0);
+    this.gop = [];
+    log(`video: ScreenStream over ${via}`);
+    sock.on("data", (chunk: Buffer) => this.feedFramed(chunk));
+    sock.on("error", () => {}); // "close" follows
+    sock.on("close", () => {
+      if (this.sock !== sock) return;
+      this.sock = null;
+      log("video: ScreenStream closed; reconnecting in 2 s");
+      if (this.sinks.size) this.restartTimer = setTimeout(() => ((this.restartTimer = null), this.start()), 2000);
+    });
+    sock.resume();
+  }
+
+  private spawn(): void {
     const args = SOURCE
       ? ["-c", SOURCE]
       : [
@@ -196,18 +235,34 @@ class Video {
     this.buf = Buffer.alloc(0);
     this.gop = [];
     proc.stdout!.on("data", (chunk: Buffer) => this.feed(chunk));
+    // Switch to ScreenStream as soon as a broadcast starts.
+    const probe = setInterval(() => {
+      if (this.proc !== proc || SOURCE) return clearInterval(probe);
+      connectStream()
+        .then(({ sock, via }) => {
+          if (this.proc !== proc) return void sock.destroy();
+          clearInterval(probe);
+          this.proc = null;
+          proc.kill("SIGTERM");
+          this.attach(sock, via);
+        })
+        .catch(() => {});
+    }, 10_000);
     proc.on("exit", (code) => {
       if (this.proc !== proc) return;
       this.proc = null;
       log(`video source exited (${code}); restarting in 2 s`);
+      // start() tries ScreenStream again first, so a broadcast started later takes over.
       if (this.sinks.size) this.restartTimer = setTimeout(() => ((this.restartTimer = null), this.start()), 2000);
     });
   }
 
   private stop(): void {
-    const proc = this.proc;
+    const proc = this.proc, sock = this.sock;
     this.proc = null;
+    this.sock = null;
     proc?.kill("SIGTERM");
+    sock?.destroy();
     log("video: stopped, nobody is watching");
   }
 
@@ -218,6 +273,19 @@ class Video {
     for (const [start, payload] of nalStarts(this.buf, 0)) if ((this.buf[payload] & 31) === 9) auds.push(start);
     for (let i = 0; i + 1 < auds.length; i++) this.emit(this.buf.subarray(auds[i], auds[i + 1]));
     if (auds.length > 1) this.buf = Buffer.from(this.buf.subarray(auds[auds.length - 1]));
+  }
+
+  /** ScreenStream sends each frame whole, behind a 4-byte length, so it is passed on without waiting for the next. */
+  private feedFramed(chunk: Buffer): void {
+    this.buf = this.buf.length ? Buffer.concat([this.buf, chunk]) : chunk;
+    let at = 0;
+    while (this.buf.length - at >= 4) {
+      const n = this.buf.readUInt32BE(at);
+      if (this.buf.length - at - 4 < n) break;
+      this.emit(this.buf.subarray(at + 4, at + 4 + n));
+      at += 4 + n;
+    }
+    this.buf = at ? Buffer.from(this.buf.subarray(at)) : this.buf;
   }
 
   private emit(au: Buffer): void {
@@ -263,6 +331,98 @@ async function api(path: string, body?: unknown): Promise<Response> {
     throw new PhoneError(res.status, detail.error ?? `HTTP ${res.status}`);
   }
   return res;
+}
+
+const UDID = (process.env.IPHONE_UDID ?? "00008110-000870C036EB801E").replace(/-/g, "").toLowerCase();
+
+/** One usbmuxd request (binary header + XML plist) on a fresh socket; resolves with the reply's plist text. */
+function usbmuxRequest(sock: net.Socket, fields: string): Promise<string> {
+  const body = Buffer.from(
+    `<?xml version="1.0" encoding="UTF-8"?><plist version="1.0"><dict>${fields}` +
+      "<key>ClientVersionString</key><string>iphone-relay</string><key>ProgName</key><string>iphone-relay</string></dict></plist>",
+  );
+  const head = Buffer.alloc(16);
+  head.writeUInt32LE(16 + body.length, 0);
+  head.writeUInt32LE(1, 4); // protocol version 1 (plist)
+  head.writeUInt32LE(8, 8); // message type: plist
+  head.writeUInt32LE(1, 12);
+  sock.write(Buffer.concat([head, body]));
+  return new Promise((resolve, reject) => {
+    let buf = Buffer.alloc(0);
+    const onData = (chunk: Buffer) => {
+      buf = Buffer.concat([buf, chunk]);
+      if (buf.length < 4 || buf.length < buf.readUInt32LE(0)) return;
+      sock.off("data", onData);
+      sock.pause(); // keep what follows (the tunnel's first bytes) until the caller listens
+      const size = buf.readUInt32LE(0);
+      if (buf.length > size) sock.unshift(buf.subarray(size)); // the tunnel may start right away
+      resolve(buf.subarray(16, size).toString());
+    };
+    sock.on("data", onData);
+    sock.once("error", reject);
+    sock.once("close", () => reject(new Error("usbmuxd closed the connection")));
+  });
+}
+
+function usbmuxSocket(): Promise<net.Socket> {
+  return new Promise((ok, fail) => {
+    const sock = net.connect(process.env.RELAY_USBMUXD ?? "/var/run/usbmuxd");
+    sock.once("connect", () => ok(sock));
+    sock.once("error", fail);
+  });
+}
+
+/** A TCP connection to `port` on the phone through usbmuxd, over USB only. */
+async function usbmuxConnect(port: number): Promise<net.Socket> {
+  const list = await usbmuxSocket();
+  const devices = await usbmuxRequest(list, "<key>MessageType</key><string>ListDevices</string>").finally(() => list.destroy());
+  let id: string | undefined;
+  for (const [, props] of devices.matchAll(/<key>Properties<\/key>\s*<dict>([\s\S]*?)<\/dict>/g)) {
+    const field = (key: string) => new RegExp(`<key>${key}</key>\\s*<(?:string|integer)>([^<]*)<`).exec(props)?.[1];
+    if (field("SerialNumber")?.replace(/-/g, "").toLowerCase() === UDID && field("ConnectionType") === "USB") id = field("DeviceID");
+  }
+  if (!id) throw new Error("the phone is not on USB");
+  const sock = await usbmuxSocket();
+  const portBE = ((port & 0xff) << 8) | (port >> 8); // usbmuxd wants the port in network byte order
+  const reply = await usbmuxRequest(
+    sock,
+    `<key>MessageType</key><string>Connect</string><key>DeviceID</key><integer>${id}</integer>` +
+      `<key>PortNumber</key><integer>${portBE}</integer>`,
+  ).catch((e) => (sock.destroy(), Promise.reject(e)));
+  const result = /<key>Number<\/key>\s*<integer>(\d+)</.exec(reply)?.[1];
+  if (result !== "0") throw (sock.destroy(), new Error(`usbmuxd refused the connection (${result})`));
+  sock.removeAllListeners("error");
+  sock.removeAllListeners("close");
+  return sock;
+}
+
+/** ScreenStream's socket: over USB first, since Wi-Fi power save delays the first packet after a still
+ * screen by up to ~110 ms; else the phone's Wi-Fi IP. Rejects when no broadcast is running. Paused. */
+async function connectStream(): Promise<{ sock: net.Socket; via: string }> {
+  try {
+    return { sock: await usbmuxConnect(STREAM_PORT), via: "USB" };
+  } catch {
+    const ip = await phoneIp();
+    if (!ip) throw new Error("no phone IP");
+    const sock = net.connect({ host: ip, port: STREAM_PORT, noDelay: true });
+    await new Promise<void>((ok, fail) => {
+      sock.setTimeout(3000, () => sock.destroy(new Error("timed out")));
+      sock.once("connect", () => (sock.setTimeout(0), sock.pause(), ok()));
+      sock.once("error", fail);
+    });
+    sock.removeAllListeners("error");
+    return { sock, via: `Wi-Fi ${ip}` };
+  }
+}
+
+/** The phone's Wi-Fi address, from WDA's status. */
+async function phoneIp(): Promise<string | null> {
+  try {
+    const body = (await (await api("/status")).json()) as { value?: { status?: { ios?: { ip?: string } } } };
+    return body.value?.status?.ios?.ip ?? null;
+  } catch {
+    return null;
+  }
 }
 
 let points: { width: number; height: number } | null = null; // the screen in points, which WDA's taps use

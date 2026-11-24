@@ -40,6 +40,8 @@ STATE = Path(os.environ.get("IPHONE_WDA_HOME", Path.home() / ".iphone-wda"))
 TUNNELD = "http://127.0.0.1:49151"
 WDA_PORT = int(os.environ.get("WDA_PORT", "8100"))
 RUNNER_EXECUTABLE = "WebDriverAgentRunner-Runner"
+SCREENSTREAM_EXECUTABLE = "ScreenStream"
+STREAM_PORT = 8400  # ScreenStream's broadcast extension: the screen as H.264 (screenstream/)
 
 
 def log(msg: str) -> None:
@@ -154,7 +156,17 @@ class WDA:
         self.gesture([[x1, y1, 0], [x2, y2, max(duration * 1000, 50)]])
 
     def gesture(self, points: list[list[float]]) -> None:
-        """One finger along [x, y, ms since touch-down] points, lifted at the last one (W3C actions)."""
+        """One finger along [x, y, ms since touch-down] points, lifted at the last one. Goes through our
+        WDA's /wda/touch, which hands it straight to XCTest (~20 ms to the app instead of ~50 ms), else
+        through W3C actions, which first look up the active app and wait for it to settle afterwards."""
+        if getattr(self, "_raw_touch", True):
+            try:
+                self.req("POST", "/wda/touch", {"points": points})
+                return
+            except WDAError as e:
+                if e.error != "unknown command":
+                    raise
+                self._raw_touch = False  # a WDA build without the patch
         x0, y0, t0 = points[0]
         steps = [{"type": "pointerMove", "duration": 0, "x": x0, "y": y0}, {"type": "pointerDown", "button": 0}]
         px, py, pt = x0, y0, t0
@@ -299,6 +311,36 @@ def find_runner(tunnel: str) -> str:
     if not ids:
         raise RuntimeError("WebDriverAgentRunner is not installed; run host/install-wda.sh")
     return ids[0]
+
+
+def find_screenstream(tunnel: str) -> str | None:
+    """Bundle ID of the installed ScreenStream app, if any (re-signing may rename it, so match the executable)."""
+    apps = json.loads(pm("apps", "list", "--type", "User", "--tunnel", tunnel))
+    return next((bid for bid, info in apps.items() if info.get("CFBundleExecutable") == SCREENSTREAM_EXECUTABLE), None)
+
+
+def streaming(host: str) -> bool:
+    try:
+        socket.create_connection((host, STREAM_PORT), timeout=3).close()
+        return True
+    except OSError:
+        return False
+
+
+def start_broadcast(wda: "WDA", bundle_id: str) -> None:
+    """Starts ScreenStream's broadcast with the taps a person would make, then goes home."""
+    wda.launch(bundle_id)
+    wda.tap_element("broadcastPicker")
+    for _ in range(40):  # iOS's sheet slides up
+        try:
+            wda.tap_element("Start Broadcast")
+            break
+        except WDAError:
+            time.sleep(0.25)
+    else:
+        raise WDAError("no such element", "iOS's broadcast sheet did not show Start Broadcast")
+    time.sleep(4.5)  # iOS counts down 3 s before the extension starts
+    wda.home()
 
 
 def wda_ok(url: str) -> dict | None:
@@ -467,8 +509,19 @@ def run_once(udid: str, bundle_id: str | None) -> None:
             log(f"MJPEG stream set to {fps} fps at {scale}% size")
         except (WDAError, httpx.HTTPError, ValueError) as e:
             log(f"could not set the MJPEG frame rate: {e}")
+        # ScreenStream: start its broadcast now and whenever it stops (a reboot, iOS ending it), but at
+        # most every 10 minutes, since starting it takes over the screen for ~6 s.
+        screenstream = None if os.environ.get("IPHONE_SCREENSTREAM") == "0" else find_screenstream(udid)
+        tried = 0.0
         fails = 0
         while proc.poll() is None and fails < 3:
+            if screenstream and time.time() - tried > 600 and not streaming(PROXY_HOST):
+                tried = time.time()
+                try:
+                    start_broadcast(WDA(url), screenstream)
+                    log("ScreenStream " + ("broadcasting" if streaming(PROXY_HOST) else "did not start"))
+                except (WDAError, httpx.HTTPError) as e:
+                    log(f"could not start ScreenStream: {e}")
             time.sleep(10)  # also a keepalive: regular traffic keeps the phone's Wi-Fi awake
             fails = 0 if wda_ok(url) else fails + 1
         log("WDA stopped answering" if fails else f"xcuitest exited ({proc.returncode})")

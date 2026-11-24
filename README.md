@@ -166,6 +166,30 @@ driving the phone meanwhile. `POST /recording/stop` finishes the MP4 and returns
 an hour; the recording also ends by itself after `max_seconds`, and stop still collects it. One
 recording runs at a time. Files live in a private folder under `$TMPDIR` that `serve` deletes when it exits.
 
+### ScreenStream: real-time video
+
+WDA's MJPEG stream is XCTest screenshots (about 28 fps, JPEG), carried through the Python USB tunnel
+and re-encoded by ffmpeg; that path alone costs a few hundred milliseconds. `screenstream/` is an app
+with a ReplayKit Broadcast Upload extension: iOS hands it every screen update, VideoToolbox encodes it
+in hardware (H.264 Constrained Baseline, low-latency rate control, no B-frames, up to 60 fps), and it
+serves each frame on TCP port 8400 of the phone as soon as it is encoded (a 4-byte length, then Annex
+B). A new client gets a keyframe of the current screen at once; a client that falls behind skips to
+the next keyframe instead of queueing. iOS shows the red broadcast indicator in the status bar.
+
+- Build: `vm/build-screenstream-ipa.sh` on a Mac with Xcode and XcodeGen → `dist/ScreenStream.ipa`.
+  Install: `host/install-wda.sh dist/ScreenStream.ipa dev.raygen.ScreenStream`.
+- `up` starts the broadcast after WDA comes up (opens ScreenStream, taps its button, then Start
+  Broadcast, then goes home), and again when port 8400 stops answering, at most every 10 minutes.
+  `IPHONE_SCREENSTREAM=0` turns that off.
+- The relay reads it over USB through usbmuxd when the phone is plugged in (Wi‑Fi power save delays
+  the first packet after a still screen by up to ~110 ms), else from the phone's Wi‑Fi IP, else falls
+  back to MJPEG through ffmpeg and switches over once a broadcast starts.
+
+Touches: our WDA adds `POST /wda/touch {"points": [[x, y, ms], …]}` (`vm/wda-raw-touch.patch`), which
+hands the touch straight to XCTest. In the simulator the touch reaches the app ~20–25 ms after the
+request (W3C actions: ~45–55 ms, since WDA first looks up the active app). XCTest then holds the call
+for ~270 ms after the finger lifts, so touches can't overlap; that wait doesn't delay what you see.
+
 ### screen-relay (H.264)
 
 `relay/relay.ts` is a [screen-relay](https://www.npmjs.com/package/screen-relay) engine for the

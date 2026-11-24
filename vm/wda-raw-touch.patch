@@ -1,0 +1,69 @@
+diff --git a/WebDriverAgentLib/Commands/FBTouchActionCommands.m b/WebDriverAgentLib/Commands/FBTouchActionCommands.m
+index 7788175..3dba1ed 100644
+--- a/WebDriverAgentLib/Commands/FBTouchActionCommands.m
++++ b/WebDriverAgentLib/Commands/FBTouchActionCommands.m
+@@ -8,9 +8,13 @@
+ 
+ #import "FBTouchActionCommands.h"
+ 
++#import "FBCommandStatus.h"
+ #import "FBRoute.h"
+ #import "FBRouteRequest.h"
+ #import "FBSession.h"
++#import "FBXCTestDaemonsProxy.h"
++#import "XCPointerEventPath.h"
++#import "XCSynthesizedEventRecord.h"
+ #import "XCUIApplication+FBTouchAction.h"
+ 
+ @implementation FBTouchActionCommands
+@@ -22,11 +26,50 @@
+   return
+   @[
+     [[FBRoute POST:@"/actions"] respondWithTarget:self action:@selector(handlePerformW3CTouchActions:)],
++    [[FBRoute POST:@"/wda/touch"].withoutSession respondWithTarget:self action:@selector(handleRawTouch:)],
+   ];
+ }
+ 
+ #pragma mark - Commands
+ 
++/**
++ One finger along {"points": [[x, y, ms], ...]} (screen points, ms since touch-down), lifted at the last point.
++ Unlike /actions it skips the active-application lookup, element resolution and the wait for the app to
++ settle: it hands the event straight to testmanagerd. Answers with how long building and synthesizing took.
++ */
+++ (id<FBResponsePayload>)handleRawTouch:(FBRouteRequest *)request
++{
++  NSArray *points = request.arguments[@"points"];
++  if (![points isKindOfClass:NSArray.class] || points.count < 1 || points.count > 200) {
++    return FBResponseWithStatus([FBCommandStatus invalidArgumentErrorWithMessage:@"points must be 1 to 200 [x, y, ms] triples" traceback:nil]);
++  }
++  for (id point in points) {
++    if (![point isKindOfClass:NSArray.class] || [point count] != 3) {
++      return FBResponseWithStatus([FBCommandStatus invalidArgumentErrorWithMessage:@"each point must be [x, y, ms]" traceback:nil]);
++    }
++  }
++  CFAbsoluteTime start = CFAbsoluteTimeGetCurrent();
++  double t0 = [points[0][2] doubleValue] / 1000.0;
++  CGPoint first = CGPointMake([points[0][0] doubleValue], [points[0][1] doubleValue]);
++  XCPointerEventPath *path = [[XCPointerEventPath alloc] initForTouchAtPoint:first offset:0];
++  double last = 0;
++  for (NSUInteger i = 1; i < points.count; i++) {
++    last = MAX(last, [points[i][2] doubleValue] / 1000.0 - t0);
++    [path moveToPoint:CGPointMake([points[i][0] doubleValue], [points[i][1] doubleValue]) atOffset:last];
++  }
++  [path liftUpAtOffset:last];
++  XCSynthesizedEventRecord *event = [[XCSynthesizedEventRecord alloc] initWithName:@"touch"
++                                                              interfaceOrientation:UIInterfaceOrientationPortrait];
++  [event addPointerEventPath:path];
++  CFAbsoluteTime built = CFAbsoluteTimeGetCurrent();
++  NSError *error;
++  if (![FBXCTestDaemonsProxy synthesizeEventWithRecord:event error:&error]) {
++    return FBResponseWithUnknownError(error);
++  }
++  CFAbsoluteTime done = CFAbsoluteTimeGetCurrent();
++  return FBResponseWithObject(@{@"buildMs": @((built - start) * 1000), @"synthMs": @((done - built) * 1000)});
++}
++
+ + (id<FBResponsePayload>)handlePerformW3CTouchActions:(FBRouteRequest *)request
+ {
+   XCUIApplication *application = request.session.activeApplication;
