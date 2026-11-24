@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "iphone": {
+      "command": "uv",
+      "args": ["run", "--quiet", "--script", "/Users/raygen/iphone-wda/host/iphone.py", "mcp"]
+    }
+  }
+}

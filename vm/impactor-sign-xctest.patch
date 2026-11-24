@@ -1,0 +1,17 @@
+Sign .xctest bundles like frameworks (certificate, no entitlements/profile).
+Impactor v2.7.3 classifies PlugIns/*.xctest as an unknown bundle and leaves it unsigned,
+so the WebDriverAgent test bundle cannot load on a stock iPhone.
+
+diff --git a/crates/plume_utils/src/bundle.rs b/crates/plume_utils/src/bundle.rs
+index 4dc9769..2161577 100644
+--- a/crates/plume_utils/src/bundle.rs
++++ b/crates/plume_utils/src/bundle.rs
+@@ -275,7 +275,7 @@ impl BundleType {
+         match ext {
+             "app" => Some(BundleType::App),
+             "appex" => Some(BundleType::AppExtension),
+-            "framework" => Some(BundleType::Framework),
++            "framework" | "xctest" => Some(BundleType::Framework),
+             "dylib" => Some(BundleType::Dylib),
+             _ => Some(BundleType::Unknown),
+         }
