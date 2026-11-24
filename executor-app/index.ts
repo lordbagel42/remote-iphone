@@ -157,13 +157,14 @@ export default defineApp(requirements, {
       ),
       swipe: mutation(
         {
-          description: "Swipe or drag between two screen points. To scroll down, swipe from lower on the screen to higher.",
+          description:
+            "Swipe or drag between two screen points; the finger moves for duration seconds and lifts at the end. To scroll down, swipe from lower on the screen to higher. A short duration (0.1-0.3) flicks; a longer one drags slowly. The same point twice is a long press.",
           input: object({
             from_x: number(),
             from_y: number(),
             to_x: number(),
             to_y: number(),
-            duration: number({ description: "Seconds" }).default(0.2),
+            duration: number({ description: "Seconds the finger takes to move" }).default(0.2),
           }),
           output: Ok,
         },

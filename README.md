@@ -110,7 +110,7 @@ MCP tools (and the same CLI subcommands):
 | `screenshot` | `screenshot [-o f.png] [--pixels]` | Scaled to screen points (375×667), so image pixels = tap coordinates |
 | `ui_tree` | `ui [--format compact\|xml\|json\|description]` | `compact`: visible text and controls with their tap point |
 | `tap` | `tap X Y` or `tap "Label"` | By coordinates, or by exact label/name/value |
-| `swipe` | `swipe X1 Y1 X2 Y2 [--duration s]` | Scroll down = swipe upward |
+| `swipe` | `swipe X1 Y1 X2 Y2 [--duration s]` | Scroll down = swipe upward; the finger moves for `duration` (0.1–0.3 s flicks) |
 | `type_text` | `type "text"` | Into the focused field; `\n` for return |
 | `press_button` | `press home\|volumeup\|volumedown\|lock\|unlock` | |
 | `launch_app` | `launch BUNDLE_ID [--restart]` | e.g. `com.apple.Preferences`, `com.apple.mobilesafari` |

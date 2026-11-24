@@ -141,8 +141,10 @@ class WDA:
         return r["x"] + r["width"] / 2, r["y"] + r["height"] / 2
 
     def swipe(self, x1: float, y1: float, x2: float, y2: float, duration: float = 0.2) -> None:
-        body = {"fromX": x1, "fromY": y1, "toX": x2, "toY": y2, "duration": duration}
-        self.s("POST", "/wda/dragfromtoforduration", body)
+        """Finger down at (x1, y1), moved to (x2, y2) over duration seconds, then lifted: a short duration
+        flicks (scrolls with momentum), a long one drags. The same point twice holds it (long press).
+        Not WDA's dragfromtoforduration: its duration is a hold before the drag, which apps take as a long press."""
+        self.gesture([[x1, y1, 0], [x2, y2, max(duration * 1000, 50)]])
 
     def gesture(self, points: list[list[float]]) -> None:
         """One finger along [x, y, ms since touch-down] points, lifted at the last one (W3C actions)."""
@@ -1126,7 +1128,8 @@ def cmd_mcp(_args) -> None:
 
     @m.tool()
     def swipe(from_x: float, from_y: float, to_x: float, to_y: float, duration: float = 0.2) -> str:
-        """Swipe/drag between two screen points. To scroll down, swipe from low on the screen to high."""
+        """Swipe/drag between two screen points, the finger moving for duration seconds. To scroll down,
+        swipe from low on the screen to high. Short (0.1-0.3 s) flicks; longer drags slowly."""
         wda.swipe(from_x, from_y, to_x, to_y, duration)
         return "ok"
 
