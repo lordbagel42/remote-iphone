@@ -272,6 +272,7 @@ Coordinates are screen points (375x667); screenshot images use the same scale.
 Prefer tap with text when the element has a label; use coordinates otherwise.
 screenshot returns a URL, not image bytes; open it with your image-viewing tool.
 To capture a flow as video, call start_recording, do the steps, then stop_recording for an MP4 URL.
+Control Center opens with a swipe up from the bottom edge (from_y 665). Home does not close Control Center or a long-press menu; tap an empty area outside it instead.
 Only one agent should drive the phone at a time. A 503 error means WebDriverAgent is restarting; wait a minute and retry.
 If a tool misbehaves (wrong result, an error that persists after a retry), call report_bug with the steps that led to it.
 `,

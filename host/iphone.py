@@ -143,7 +143,14 @@ class WDA:
     def swipe(self, x1: float, y1: float, x2: float, y2: float, duration: float = 0.2) -> None:
         """Finger down at (x1, y1), moved to (x2, y2) over duration seconds, then lifted: a short duration
         flicks (scrolls with momentum), a long one drags. The same point twice holds it (long press).
-        Not WDA's dragfromtoforduration: its duration is a hold before the drag, which apps take as a long press."""
+        Not WDA's dragfromtoforduration: its duration is a hold before the drag, which apps take as a long press.
+        Except from the top or bottom edge: SpringBoard ignores a W3C touch there (Control Center, Notification
+        Center), but takes XCTest's drag after a short hold."""
+        if not hasattr(self, "_height"):
+            self._height = self.window_size()[1]
+        if y1 <= 4 or y1 >= self._height - 4:
+            body = {"fromX": x1, "fromY": y1, "toX": x2, "toY": y2, "duration": min(duration, 0.1)}
+            return self.s("POST", "/wda/dragfromtoforduration", body)
         self.gesture([[x1, y1, 0], [x2, y2, max(duration * 1000, 50)]])
 
     def gesture(self, points: list[list[float]]) -> None:
