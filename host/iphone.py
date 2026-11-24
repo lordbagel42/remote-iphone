@@ -383,6 +383,12 @@ def run_once(udid: str, bundle_id: str | None) -> None:
         (STATE / "session").unlink(missing_ok=True)
         PROXY_HOST = urlsplit(url).hostname
         log(f"WDA ready at {url}")
+        try:  # WDA's MJPEG stream defaults to 10 fps; the A15 manages about 30 at full size
+            fps = int(os.environ.get("WDA_MJPEG_FPS", "30"))
+            WDA(url).s("POST", "/appium/settings", {"settings": {"mjpegServerFramerate": fps}})
+            log(f"MJPEG stream set to {fps} fps")
+        except (WDAError, httpx.HTTPError, ValueError) as e:
+            log(f"could not set the MJPEG frame rate: {e}")
         fails = 0
         while proc.poll() is None and fails < 3:
             time.sleep(10)  # also a keepalive: regular traffic keeps the phone's Wi-Fi awake
