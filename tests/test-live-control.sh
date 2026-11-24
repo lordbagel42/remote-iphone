@@ -19,6 +19,7 @@ agent-browser $S open $U/ >/dev/null
 agent-browser $S set viewport 1000 1100 2 >/dev/null
 agent-browser $S fill 'input[name=password]' correct-horse >/dev/null
 agent-browser $S click 'button' >/dev/null
+agent-browser $S open $U/mjpeg >/dev/null
 sleep 3
 curl -s -X POST $U/calls >/dev/null  # no-op
 # image box -> click at 50%/25% (expect tap ~ (187,167)), drag from 50%/80% to 50%/30% (swipe up)

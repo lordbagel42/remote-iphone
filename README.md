@@ -147,8 +147,8 @@ It needs `IPHONE_API_TOKEN` (32+ characters) and `IPHONE_PUBLIC_URL`, and talks 
 Errors are `{ok: false, error}` with 400 (bad input), 401, 422 (WDA refused, e.g. no such element)
 or 503 (WDA not running).
 
-With `IPHONE_VIEW_PASSWORD` set, `serve` also shows a live view of the screen at `/`: a password
-page, then WDA's MJPEG stream (relayed from port `WDA_MJPEG_PORT`, default 9100, on the `WDA_URL`
+With `IPHONE_VIEW_PASSWORD` set, `serve` also shows a live view of the screen: a password page, then
+`/` opens the H.264 viewer (`/relay`, below). The older page at `/mjpeg` shows WDA's MJPEG stream (relayed from port `WDA_MJPEG_PORT`, default 9100, on the `WDA_URL`
 host; `up --listen-mjpeg 9100` provides it). Login sets a 30‑day HttpOnly cookie. The page reopens
 the stream when it stalls or WDA restarts. On the page, click to tap, drag to swipe, hold to long
 press, use the Home/Wake/Lock/volume buttons, and type into the focused field. The login cookie

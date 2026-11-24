@@ -129,7 +129,8 @@ class WDA:
     def tap(self, x: float, y: float, fast: bool = False) -> None:
         """XCTest's tap waits for the app to idle first (about 1 s); fast sends the touch at once."""
         if fast:
-            self.gesture([[x, y, 0], [x, y, 100]])
+            # SpringBoard and most controls act when the finger lifts, so the hold is kept short.
+            self.gesture([[x, y, 0], [x, y, 40]])
         else:
             self.s("POST", "/wda/tap", {"x": x, "y": y})
 
@@ -330,6 +331,10 @@ def streaming(host: str) -> bool:
 def start_broadcast(wda: "WDA", bundle_id: str) -> None:
     """Starts ScreenStream's broadcast with the taps a person would make, then goes home."""
     wda.launch(bundle_id)
+    try:  # a SpringBoard alert (such as Edit Home Screen's tip) can cover the app
+        wda.s("POST", "/alert/dismiss")
+    except WDAError:
+        pass
     wda.tap_element("broadcastPicker")
     for _ in range(40):  # iOS's sheet slides up
         try:
@@ -1011,7 +1016,7 @@ def cmd_serve(args) -> None:
                     except OSError:
                         pass
                 return
-            if view_password and self.path.partition("?")[0] in ("/", "/login", "/logout", "/live.mjpeg"):
+            if view_password and self.path.partition("?")[0] in ("/", "/mjpeg", "/login", "/logout", "/live.mjpeg"):
                 return self._view(method)
             if self.path.partition("?")[0] in RELAY_PATHS:
                 return self._relay(method)
@@ -1071,7 +1076,9 @@ def cmd_serve(args) -> None:
                 if path == "/live.mjpeg":
                     return self._send(401, "text/plain", b"log in first")
                 return self._send(200, "text/html; charset=utf-8", LOGIN_PAGE.replace("{error}", "").encode())
-            if path == "/":
+            if path == "/":  # the H.264 viewer; the MJPEG page stays at /mjpeg
+                return self._send(303, "text/plain", b"", {"Location": "/relay"})
+            if path == "/mjpeg":
                 return self._send(200, "text/html; charset=utf-8", LIVE_PAGE.encode())
             try:  # /live.mjpeg: relay WDA's own HTTP/1.0 multipart response byte for byte
                 upstream = socket.create_connection(mjpeg_addr, timeout=10)
