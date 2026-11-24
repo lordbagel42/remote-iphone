@@ -15,6 +15,7 @@ Device-side plumbing uses the `pymobiledevice3` CLI (set PMD3 to override the co
 
 import argparse
 import base64
+import hashlib
 import io
 import json
 import os
@@ -695,6 +696,30 @@ def cmd_serve(args) -> None:
     lock = threading.Lock()  # one phone: run one action at a time
     shots: dict[str, tuple[float, bytes]] = {}  # unguessable id -> (expiry, JPEG), for screenshot links
 
+    bug_url = os.environ.get("IPHONE_BUG_WEBHOOK_URL", "")  # an Amp webhook; the thread behind it fixes bugs
+
+    def report_bug(body: dict) -> dict:
+        """Sends a bug report, with the phone's current state, to the webhook of the Amp thread that maintains this."""
+        if not bug_url:
+            raise WDAError("unavailable", "bug reports are not set up (IPHONE_BUG_WEBHOOK_URL)")
+        if not isinstance(body.get("title"), str) or not body["title"].strip():
+            raise ValueError("title is required")
+        limits = {"title": 200, "description": 8000, "steps": 4000, "expected": 2000, "actual": 2000, "reporter": 200}
+        report: dict = {k: str(body[k])[:n] for k, n in limits.items() if body.get(k)}
+        diagnostics: dict = {"time": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}
+        diagnostics["iphone.py"] = hashlib.sha256(Path(__file__).read_bytes()).hexdigest()[:12]
+        try:
+            diagnostics["wda"] = wda.status()
+            diagnostics["active_app"] = wda.active_app()
+        except Exception as e:  # the report matters most when WDA itself is broken
+            diagnostics["wda_error"] = str(e)
+        report["diagnostics"] = diagnostics
+        report_id = secrets.token_hex(8)
+        r = httpx.post(bug_url, json=report, headers={"Idempotency-Key": report_id}, timeout=20)
+        if r.status_code >= 300:
+            raise WDAError("unavailable", f"the bug report webhook answered HTTP {r.status_code}")
+        return {"report_id": report_id, "sent": True}
+
     def act(method: str, path: str, body: dict) -> tuple[int, str, bytes]:
         def ok(value=None):
             return 200, "application/json", json.dumps({"ok": True, "value": value}).encode()
@@ -720,6 +745,8 @@ def cmd_serve(args) -> None:
             return 200, "text/plain; charset=utf-8", wda.source(body.get("format", "compact")).encode()
         if method != "POST":
             return 404, "application/json", b'{"ok":false,"error":"not found"}'
+        if path == "/bug":
+            return ok(report_bug(body))
         if path == "/tap":
             if "text" in body:
                 x, y = wda.tap_element(str(body["text"]))

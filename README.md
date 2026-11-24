@@ -138,6 +138,7 @@ It needs `IPHONE_API_TOKEN` (32+ characters) and `IPHONE_PUBLIC_URL`, and talks 
 | `POST /press` | `{button}` | home, appswitcher (double Home), volumeup, volumedown, lock, unlock |
 | `POST /launch` | `{bundle_id, restart?}` | |
 | `POST /home` | | |
+| `POST /bug` | `{title, description?, steps?, expected?, actual?, reporter?}` | sends a bug report with the phone's state to the maintaining Amp thread (`IPHONE_BUG_WEBHOOK_URL`) |
 
 Errors are `{ok: false, error}` with 400 (bad input), 401, 422 (WDA refused, e.g. no such element)
 or 503 (WDA not running).
@@ -166,6 +167,15 @@ forwards screen-relay's paths to it after the same cookie or token checks, and `
 cd relay && pnpm install && IPHONE_API_TOKEN=… node relay.ts     # Node 23.6 or newer, and ffmpeg
 npx screen-relay click 0.5 0.25 --url https://iphone.example.com --token-file token   # the API token
 ```
+
+### Bug reports
+
+`POST /bug` (the Executor app's `report_bug` tool) forwards a report, plus WDA's status and the
+frontmost app, to an Amp webhook. `amp-plugin/iphone-bug-report.ts`, loaded as a plugin in the Amp
+thread that maintains this toolkit, registers that webhook and posts each report into the thread
+as a message, and the agent there fixes the bug. The plugin writes the webhook URL to
+`~/.config/iphone-bug-report/webhook-url` (0600); put it in `serve`'s environment as
+`IPHONE_BUG_WEBHOOK_URL`. The URL is a credential.
 
 ## How `up` recovers
 

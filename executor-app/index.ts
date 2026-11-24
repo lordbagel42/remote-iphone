@@ -208,6 +208,22 @@ export default defineApp(requirements, {
           return done;
         },
       ),
+      report_bug: mutation(
+        {
+          description:
+            "Report a bug in the iPhone tools (WebDriverAgent, this app, the phone's control service) to the Amp agent that maintains them, which will investigate and fix it. The phone's current status and frontmost app are attached automatically. Report problems with the tools, not with apps on the phone.",
+          input: object({
+            title: string({ minLength: 1, maxLength: 200, description: "One line: what went wrong" }),
+            description: string({ maxLength: 8000, description: "What happened, including any error message" }),
+            steps: string({ maxLength: 4000, description: "The tool calls that led to it, in order" }).optional(),
+            expected: string({ maxLength: 2000 }).optional(),
+            actual: string({ maxLength: 2000 }).optional(),
+            reporter: string({ maxLength: 200, description: "Who is reporting, such as your agent or thread name" }).optional(),
+          }),
+          output: object({ report_id: string(), sent: boolean() }),
+        },
+        async (ctx, input) => (await value(ctx, "POST", "/bug", input)) as { report_id: string; sent: boolean },
+      ),
       go_home: mutation(
         { description: "Go to the home screen.", input: object({}), output: Ok },
         async (ctx) => {
@@ -225,6 +241,7 @@ Coordinates are screen points (375x667); screenshot images use the same scale.
 Prefer tap with text when the element has a label; use coordinates otherwise.
 screenshot returns a URL, not image bytes; open it with your image-viewing tool.
 Only one agent should drive the phone at a time. A 503 error means WebDriverAgent is restarting; wait a minute and retry.
+If a tool misbehaves (wrong result, an error that persists after a retry), call report_bug with the steps that led to it.
 `,
     },
   ),
