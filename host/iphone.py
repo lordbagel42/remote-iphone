@@ -714,8 +714,8 @@ class Recorder:
         """Deletes the current recording and its ffmpeg log, and returns the log's last line."""
         log_file = self.out.with_suffix(".log")
         lines = log_file.read_text(errors="replace").strip().splitlines() if log_file.exists() else []
-        self.out.unlink(missing_ok=True)
-        log_file.unlink(missing_ok=True)
+        for f in (self.out, log_file, self.out.with_suffix(".progress")):
+            f.unlink(missing_ok=True)
         return lines[-1] if lines else "no frames"
 
     def status(self) -> dict:
@@ -736,19 +736,43 @@ class Recorder:
             self._discard()
         self.out = out = self.dir / f"{secrets.token_urlsafe(24)}.mp4"
         cmd = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-use_wallclock_as_timestamps", "1"]
-        cmd += ["-rw_timeout", "10000000", "-f", "mpjpeg", "-i", self.url, "-an", "-t", str(max_seconds)]
-        cmd += ["-vf", "scale=trunc(iw/4)*2:trunc(ih/4)*2", "-c:v", "libx264", "-preset", "veryfast", "-crf", "28"]
+        cmd += ["-progress", str(out.with_suffix(".progress")), "-stats_period", "0.1"]
+        cmd += ["-rw_timeout", "10000000", "-probesize", "32", "-analyzeduration", "0", "-f", "mpjpeg", "-i", self.url]
+        cmd += ["-an", "-t", str(max_seconds), "-vf", "scale=trunc(iw/4)*2:trunc(ih/4)*2:out_range=tv"]
+        cmd += ["-c:v", "libx264", "-preset", "veryfast", "-crf", "28", "-pix_fmt", "yuv420p"]
         # MJPEG has no frame rate: keep each frame's wall-clock time instead of rounding to ffmpeg's 25 fps.
-        cmd += ["-pix_fmt", "yuv420p", "-fps_mode", "vfr", "-enc_time_base", "1/1000", "-movflags", "+faststart"]
+        cmd += ["-fps_mode", "vfr", "-enc_time_base", "1/1000", "-movflags", "+faststart"]
         with out.with_suffix(".log").open("wb") as errlog:
             self.proc = proc = subprocess.Popen(cmd + [str(out)], stdin=subprocess.PIPE, stdout=errlog, stderr=errlog)
         self.started, self.max_seconds = time.time(), max_seconds
-        try:  # a stream that is down (or WDA restarting behind up's proxy) ends ffmpeg at once
-            proc.wait(timeout=2)
-        except subprocess.TimeoutExpired:
-            return {"recording": True, "max_seconds": max_seconds}
+        # Return once frames are being encoded, so the agent's next action is in the video. A stream
+        # that is down (or WDA restarting behind up's proxy) ends ffmpeg instead.
+        deadline = time.time() + 20
+        while proc.poll() is None and time.time() < deadline:
+            if self._progress().get("frame", "0") not in ("", "0"):
+                self.started = time.time()
+                return {"recording": True, "max_seconds": max_seconds}
+            time.sleep(0.05)
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait()
         self.proc = None
         raise WDAError("unreachable", f"cannot record WebDriverAgent's screen stream: {self._discard()}")
+
+    def _progress(self) -> dict:
+        """The latest complete block of ffmpeg's -progress output (frame, out_time_us, ...)."""
+        try:
+            lines = self.out.with_suffix(".progress").read_text(errors="replace").splitlines()
+        except FileNotFoundError:
+            return {}
+        block: dict = {}
+        last: dict = {}
+        for line in lines:
+            key, _, val = line.partition("=")
+            block[key] = val
+            if key == "progress":  # ends each block
+                last, block = block, {}
+        return last
 
     def stop(self) -> dict:
         """Stops the recording (or collects one that ended by itself) and returns its file."""
@@ -771,8 +795,10 @@ class Recorder:
             raise WDAError("unavailable", "ffmpeg did not finish the recording in 20 s") from None
         if not out.exists() or out.stat().st_size == 0:
             raise WDAError("unavailable", f"the recording failed: {self._discard()}")
-        out.with_suffix(".log").unlink(missing_ok=True)
-        seconds = min(out.stat().st_mtime - self.started, self.max_seconds)  # an early end shortens it
+        us = self._progress().get("out_time_us", "")
+        seconds = int(us) / 1e6 if us.isdigit() else time.time() - self.started  # the file's own length
+        for f in (out.with_suffix(".log"), out.with_suffix(".progress")):
+            f.unlink(missing_ok=True)
         with self.lock:
             self.done[out.stem] = (time.time() + self.KEEP, out)
         return {"id": out.stem, "seconds": round(seconds, 1), "bytes": out.stat().st_size, "expires_in": self.KEEP}
@@ -904,6 +930,7 @@ def cmd_serve(args) -> None:
                 with src:
                     self.send_response(200)
                     self.send_header("Content-Type", "video/mp4")
+                    self.send_header("Cache-Control", "private, no-store")  # else Cloudflare keeps it for hours
                     self.send_header("Content-Length", str(os.fstat(src.fileno()).st_size))
                     self.end_headers()
                     send_timeout(self.connection)

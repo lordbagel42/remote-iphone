@@ -17,15 +17,17 @@ sleep 3
 echo "no token: $(curl -s -o /dev/null -w %{http_code} -d '{}' $U/recording/start)"
 echo "stop idle: $(curl -s -w ' [%{http_code}]' "${A[@]}" -d '{}' $U/recording/stop)"
 echo "bad max: $(curl -s -w ' [%{http_code}]' "${A[@]}" -d '{"max_seconds":0}' $U/recording/start)"
-echo "start: $(curl -s -w ' [%{http_code}]' "${A[@]}" -d '{}' $U/recording/start)"
+T0=$(date +%s.%N); echo "start: $(curl -s -w ' [%{http_code}]' "${A[@]}" -d '{}' $U/recording/start)"
 echo "start again: $(curl -s -w ' [%{http_code}]' "${A[@]}" -d '{}' $U/recording/start)"
 echo "tap while recording: $(curl -s -w ' [%{http_code}]' "${A[@]}" -d '{"x":10,"y":10}' $U/tap)"
 sleep 3
 echo "status: $(curl -s "${A[@]}" $U/recording)"
-R=$(curl -s "${A[@]}" -d '{}' $U/recording/stop); echo "stop: $R"
+T1=$(date +%s.%N); R=$(curl -s "${A[@]}" -d '{}' $U/recording/stop); echo "stop: $R"
+echo "wall clock from start's request to stop's request: $(echo "$T1 - $T0" | bc) s"
 URL=$(echo "$R" | jq -r .value.url)
-curl -s -o /tmp/rec.mp4 -w "download (no auth): %{http_code} %{content_type}\n" "$URL"
-ffprobe -v error -select_streams v -count_frames -show_entries stream=codec_name,width,height,nb_read_frames:format=duration -of compact /tmp/rec.mp4
+curl -s -D /tmp/rec.h -o /tmp/rec.mp4 -w "download (no auth): %{http_code} %{content_type}\n" "$URL"
+echo "download $(grep -i '^cache-control' /tmp/rec.h)"
+ffprobe -v error -select_streams v -count_frames -show_entries stream=codec_name,pix_fmt,width,height,nb_read_frames:format=duration -of compact /tmp/rec.mp4
 echo "unknown id: $(curl -s -o /dev/null -w %{http_code} $U/recordings/AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA.mp4)"
 echo "auto-stop: $(curl -s "${A[@]}" -d '{"max_seconds":2}' $U/recording/start)"
 sleep 4
