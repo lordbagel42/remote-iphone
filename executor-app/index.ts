@@ -208,6 +208,27 @@ export default defineApp(requirements, {
           return done;
         },
       ),
+      start_recording: mutation(
+        {
+          description:
+            "Start recording the phone's screen (an MP4 at screen-point size, about 28 fps). Keep using the other tools while it records, then call stop_recording to get the video. It stops by itself after max_seconds.",
+          input: object({
+            max_seconds: number({ description: "Longest the recording may run, in seconds (1 to 1800)" }).default(300),
+          }),
+          output: json(),
+        },
+        async (ctx, input) => value(ctx, "POST", "/recording/start", input),
+      ),
+      stop_recording: mutation(
+        {
+          description:
+            "Stop the screen recording and return its MP4 URL (valid 1 hour, no auth needed), length in seconds and size in bytes. Also collects a recording that already reached max_seconds.",
+          input: object({}),
+          output: object({ url: string(), seconds: number(), bytes: number(), expires_in: number() }),
+        },
+        async (ctx) =>
+          (await value(ctx, "POST", "/recording/stop")) as { url: string; seconds: number; bytes: number; expires_in: number },
+      ),
       report_bug: mutation(
         {
           description:
@@ -240,6 +261,7 @@ Look before you act: call ui_tree (cheap, has tap points) or screenshot, then ac
 Coordinates are screen points (375x667); screenshot images use the same scale.
 Prefer tap with text when the element has a label; use coordinates otherwise.
 screenshot returns a URL, not image bytes; open it with your image-viewing tool.
+To capture a flow as video, call start_recording, do the steps, then stop_recording for an MP4 URL.
 Only one agent should drive the phone at a time. A 503 error means WebDriverAgent is restarting; wait a minute and retry.
 If a tool misbehaves (wrong result, an error that persists after a retry), call report_bug with the steps that led to it.
 `,

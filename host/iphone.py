@@ -20,12 +20,14 @@ import io
 import json
 import os
 import re
+import secrets
 import shutil
 import signal
 import socket
 import socketserver
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 from pathlib import Path
@@ -677,10 +679,114 @@ def send_timeout(sock: socket.socket, seconds: int = 30) -> None:
     sock.setsockopt(socket.SOL_SOCKET, socket.SO_SNDTIMEO, struct.pack("ll", seconds, 0))
 
 
+class Recorder:
+    """Records WDA's MJPEG screen stream to an H.264 MP4 with ffmpeg, one recording at a time, at
+    screen-point size (the coordinates taps use). Finished files are kept for an hour, then deleted."""
+
+    KEEP = 3600
+
+    def __init__(self, mjpeg_addr: tuple[str, int]):
+        host, port = self.addr = mjpeg_addr
+        self.url = f"http://[{host}]:{port}/" if ":" in host else f"http://{host}:{port}/"
+        self.dir = Path(tempfile.mkdtemp(prefix="iphone-recordings-"))  # per process: links die with it
+        self.proc: subprocess.Popen | None = None
+        self.started = 0.0
+        self.max_seconds = 0
+        self.done: dict[str, tuple[float, Path]] = {}  # unguessable id -> (expiry, MP4)
+        self.lock = threading.Lock()  # guards done; downloads run outside the API lock
+        import atexit
+
+        atexit.register(self._cleanup)
+        signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))  # so systemd's stop runs the cleanup
+
+    def _cleanup(self) -> None:
+        if self.proc and self.proc.poll() is None:
+            self.proc.kill()
+        shutil.rmtree(self.dir, ignore_errors=True)
+
+    def _expire(self) -> None:
+        now = time.time()
+        with self.lock:
+            for rid in [rid for rid, (exp, _) in self.done.items() if exp < now]:
+                self.done.pop(rid)[1].unlink(missing_ok=True)
+
+    def _discard(self) -> str:
+        """Deletes the current recording and its ffmpeg log, and returns the log's last line."""
+        log_file = self.out.with_suffix(".log")
+        lines = log_file.read_text(errors="replace").strip().splitlines() if log_file.exists() else []
+        self.out.unlink(missing_ok=True)
+        log_file.unlink(missing_ok=True)
+        return lines[-1] if lines else "no frames"
+
+    def status(self) -> dict:
+        if self.proc and self.proc.poll() is None:
+            return {"recording": True, "elapsed": round(time.time() - self.started, 1), "max_seconds": self.max_seconds}
+        return {"recording": False, "ended": self.proc is not None}  # ended: waiting for stop to collect it
+
+    def start(self, max_seconds: int) -> dict:
+        if not 1 <= max_seconds <= 1800:
+            raise ValueError("max_seconds must be 1 to 1800")
+        if self.proc and self.proc.poll() is None:
+            raise WDAError("busy", "a recording is already running; stop it first")
+        if not shutil.which("ffmpeg"):
+            raise WDAError("unavailable", "ffmpeg is not installed on the phone's host")
+        self._expire()
+        if self.proc:  # the last one ended (max_seconds or WDA restarted) and nobody collected it
+            self.proc = None
+            self._discard()
+        self.out = out = self.dir / f"{secrets.token_urlsafe(24)}.mp4"
+        cmd = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-use_wallclock_as_timestamps", "1"]
+        cmd += ["-rw_timeout", "10000000", "-f", "mpjpeg", "-i", self.url, "-an", "-t", str(max_seconds)]
+        cmd += ["-vf", "scale=trunc(iw/4)*2:trunc(ih/4)*2", "-c:v", "libx264", "-preset", "veryfast", "-crf", "28"]
+        # MJPEG has no frame rate: keep each frame's wall-clock time instead of rounding to ffmpeg's 25 fps.
+        cmd += ["-pix_fmt", "yuv420p", "-fps_mode", "vfr", "-enc_time_base", "1/1000", "-movflags", "+faststart"]
+        with out.with_suffix(".log").open("wb") as errlog:
+            self.proc = proc = subprocess.Popen(cmd + [str(out)], stdin=subprocess.PIPE, stdout=errlog, stderr=errlog)
+        self.started, self.max_seconds = time.time(), max_seconds
+        try:  # a stream that is down (or WDA restarting behind up's proxy) ends ffmpeg at once
+            proc.wait(timeout=2)
+        except subprocess.TimeoutExpired:
+            return {"recording": True, "max_seconds": max_seconds}
+        self.proc = None
+        raise WDAError("unreachable", f"cannot record WebDriverAgent's screen stream: {self._discard()}")
+
+    def stop(self) -> dict:
+        """Stops the recording (or collects one that ended by itself) and returns its file."""
+        proc, out = self.proc, getattr(self, "out", None)
+        if proc is None or out is None:
+            raise WDAError("idle", "no recording to stop; start one first")
+        self.proc = None
+        if proc.poll() is None:
+            try:
+                proc.stdin.write(b"q")  # ffmpeg finishes the file cleanly on q
+                proc.stdin.flush()
+            except OSError:
+                pass
+        try:
+            proc.wait(timeout=20)
+        except subprocess.TimeoutExpired:
+            proc.kill()  # the file has no index yet, so it would not play
+            proc.wait()
+            self._discard()
+            raise WDAError("unavailable", "ffmpeg did not finish the recording in 20 s") from None
+        if not out.exists() or out.stat().st_size == 0:
+            raise WDAError("unavailable", f"the recording failed: {self._discard()}")
+        out.with_suffix(".log").unlink(missing_ok=True)
+        seconds = min(out.stat().st_mtime - self.started, self.max_seconds)  # an early end shortens it
+        with self.lock:
+            self.done[out.stem] = (time.time() + self.KEEP, out)
+        return {"id": out.stem, "seconds": round(seconds, 1), "bytes": out.stat().st_size, "expires_in": self.KEEP}
+
+    def file(self, rid: str) -> Path | None:
+        self._expire()
+        with self.lock:
+            entry = self.done.get(rid)
+        return entry[1] if entry else None
+
+
 def cmd_serve(args) -> None:
     """Token-protected HTTP API over WDA, for agents outside the LAN (behind an HTTPS tunnel)."""
     import hmac
-    import secrets
     from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
     from urllib.parse import parse_qs
 
@@ -694,6 +800,7 @@ def cmd_serve(args) -> None:
     mjpeg_addr = (urlsplit(wda.url).hostname, int(os.environ.get("WDA_MJPEG_PORT", MJPEG_PORT)))
     relay_addr = ("127.0.0.1", int(os.environ.get("RELAY_PORT", "8300")))
     lock = threading.Lock()  # one phone: run one action at a time
+    recorder = Recorder(mjpeg_addr)
     shots: dict[str, tuple[float, bytes]] = {}  # unguessable id -> (expiry, JPEG), for screenshot links
 
     bug_url = os.environ.get("IPHONE_BUG_WEBHOOK_URL", "")  # an Amp webhook; the thread behind it fixes bugs
@@ -738,6 +845,13 @@ def cmd_serve(args) -> None:
             shots[sid] = (now + 600, wda.screenshot(True, "JPEG"))
             w, h = wda.window_size()
             return ok({"url": f"{public_url}/shots/{sid}.jpg", "width": w, "height": h, "expires_in": 600})
+        if (method, path) == ("GET", "/recording"):
+            return ok(recorder.status())
+        if (method, path) == ("POST", "/recording/start"):
+            return ok(recorder.start(int(body.get("max_seconds", 300))))
+        if (method, path) == ("POST", "/recording/stop"):
+            rec = recorder.stop()
+            return ok({"url": f"{public_url}/recordings/{rec.pop('id')}.mp4", **rec})
         if (method, path) == ("GET", "/window"):
             w, h = wda.window_size()
             return ok({"width": w, "height": h})
@@ -779,6 +893,25 @@ def cmd_serve(args) -> None:
                 if shot and shot[0] > time.time():
                     return self._send(200, "image/jpeg", shot[1])
                 return self._send(404, "application/json", b'{"ok":false,"error":"expired or unknown"}')
+            m = re.fullmatch(r"/recordings/([A-Za-z0-9_-]{32})\.mp4", self.path)
+            if method == "GET" and m:  # likewise
+                if not (f := recorder.file(m.group(1))):
+                    return self._send(404, "application/json", b'{"ok":false,"error":"expired or unknown"}')
+                try:
+                    src = f.open("rb")
+                except FileNotFoundError:  # expired just now
+                    return self._send(404, "application/json", b'{"ok":false,"error":"expired or unknown"}')
+                with src:
+                    self.send_response(200)
+                    self.send_header("Content-Type", "video/mp4")
+                    self.send_header("Content-Length", str(os.fstat(src.fileno()).st_size))
+                    self.end_headers()
+                    send_timeout(self.connection)
+                    try:
+                        shutil.copyfileobj(src, self.wfile)
+                    except OSError:
+                        pass
+                return
             if view_password and self.path.partition("?")[0] in ("/", "/login", "/logout", "/live.mjpeg"):
                 return self._view(method)
             if self.path.partition("?")[0] in RELAY_PATHS:
@@ -990,6 +1123,20 @@ def cmd_mcp(_args) -> None:
         """Open an app by bundle ID (e.g. com.apple.Preferences, com.apple.mobilesafari). restart=True relaunches it."""
         wda.launch(bundle_id, restart)
         return "ok"
+
+    recorder = Recorder((urlsplit(wda.url).hostname, int(os.environ.get("WDA_MJPEG_PORT", MJPEG_PORT))))
+
+    @m.tool()
+    def start_recording(max_seconds: int = 300) -> str:
+        """Start recording the screen to an MP4 (needs ffmpeg). It stops by itself after max_seconds
+        (at most 1800). Call stop_recording to finish and get the file."""
+        return json.dumps(recorder.start(max_seconds))
+
+    @m.tool()
+    def stop_recording() -> str:
+        """Stop the screen recording and return the MP4's local path, length and size. The file is kept an hour."""
+        rec = recorder.stop()
+        return json.dumps({"path": str(recorder.file(rec.pop("id"))), **rec})
 
     @m.tool()
     def go_home() -> str:

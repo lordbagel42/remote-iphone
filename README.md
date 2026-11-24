@@ -116,6 +116,7 @@ MCP tools (and the same CLI subcommands):
 | `launch_app` | `launch BUNDLE_ID [--restart]` | e.g. `com.apple.Preferences`, `com.apple.mobilesafari` |
 | `go_home` | `home` | |
 | `status` | `status` | WDA status and the frontmost app |
+| `start_recording` / `stop_recording` | | Screen video as an MP4 (needs ffmpeg); stop returns its local path |
 
 The WDA URL comes from `--wda`, `$WDA_URL`, or what `up` last saved in `~/.iphone-wda/wda_url`.
 
@@ -138,6 +139,9 @@ It needs `IPHONE_API_TOKEN` (32+ characters) and `IPHONE_PUBLIC_URL`, and talks 
 | `POST /press` | `{button}` | home, appswitcher (double Home), volumeup, volumedown, lock, unlock |
 | `POST /launch` | `{bundle_id, restart?}` | |
 | `POST /home` | | |
+| `POST /recording/start` | `{max_seconds?}` (default 300, at most 1800) | starts recording the screen; 422 if one is running |
+| `POST /recording/stop` | | `{url, seconds, bytes, expires_in}`: an unauthenticated MP4 link valid 1 hour |
+| `GET /recording` | | `{recording, elapsed?, max_seconds?}` |
 | `POST /bug` | `{title, description?, steps?, expected?, actual?, reporter?}` | sends a bug report with the phone's state to the maintaining Amp thread (`IPHONE_BUG_WEBHOOK_URL`) |
 
 Errors are `{ok: false, error}` with 400 (bad input), 401, 422 (WDA refused, e.g. no such element)
@@ -153,6 +157,14 @@ authorizes those API calls only when they come from the page itself (matching `O
 Taps from the page and the relay send `"fast": true`: a W3C touch sent at once, instead of XCTest's
 tap, which first waits about a second for the app to idle. Agents' taps keep XCTest's waiting tap.
 `POST /gesture {"points": [[x, y, ms], …]}` replays one finger along a path.
+
+### Screen recordings
+
+`POST /recording/start` (the Executor app's `start_recording`) runs ffmpeg on WDA's MJPEG stream,
+encoding H.264 at screen-point size (374×666) as fast as WDA sends frames (about 28 fps). Agents keep
+driving the phone meanwhile. `POST /recording/stop` finishes the MP4 and returns a link that works for
+an hour; the recording also ends by itself after `max_seconds`, and stop still collects it. One
+recording runs at a time. Files live in a private folder under `$TMPDIR` that `serve` deletes when it exits.
 
 ### screen-relay (H.264)
 
