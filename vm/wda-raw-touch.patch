@@ -1,8 +1,8 @@
 diff --git a/WebDriverAgentLib/Commands/FBTouchActionCommands.m b/WebDriverAgentLib/Commands/FBTouchActionCommands.m
-index 7788175..3dba1ed 100644
+index 7788175..59ba10a 100644
 --- a/WebDriverAgentLib/Commands/FBTouchActionCommands.m
 +++ b/WebDriverAgentLib/Commands/FBTouchActionCommands.m
-@@ -8,9 +8,13 @@
+@@ -8,10 +8,13 @@
  
  #import "FBTouchActionCommands.h"
  
@@ -11,12 +11,12 @@ index 7788175..3dba1ed 100644
  #import "FBRouteRequest.h"
  #import "FBSession.h"
 +#import "FBXCTestDaemonsProxy.h"
-+#import "XCPointerEventPath.h"
-+#import "XCSynthesizedEventRecord.h"
  #import "XCUIApplication+FBTouchAction.h"
++#import "FBRunLoopSpinner.h"
  
  @implementation FBTouchActionCommands
-@@ -22,11 +26,50 @@
+ 
+@@ -22,11 +25,49 @@
    return
    @[
      [[FBRoute POST:@"/actions"] respondWithTarget:self action:@selector(handlePerformW3CTouchActions:)],
@@ -29,41 +29,212 @@ index 7788175..3dba1ed 100644
 +/**
 + One finger along {"points": [[x, y, ms], ...]} (screen points, ms since touch-down), lifted at the last point.
 + Unlike /actions it skips the active-application lookup, element resolution and the wait for the app to
-+ settle: it hands the event straight to testmanagerd. Answers with how long building and synthesizing took.
++ settle: it goes straight into the queue of events for testmanagerd (FBXCTestDaemonsProxy), which merges
++ touches that pile up into one gesture. By default it answers once the touch is done, with how long that
++ took; with "wait": false it answers at once, so a live viewer's touches never wait on HTTP round trips.
 + */
 ++ (id<FBResponsePayload>)handleRawTouch:(FBRouteRequest *)request
 +{
 +  NSArray *points = request.arguments[@"points"];
-+  if (![points isKindOfClass:NSArray.class] || points.count < 1 || points.count > 200) {
-+    return FBResponseWithStatus([FBCommandStatus invalidArgumentErrorWithMessage:@"points must be 1 to 200 [x, y, ms] triples" traceback:nil]);
-+  }
-+  for (id point in points) {
-+    if (![point isKindOfClass:NSArray.class] || [point count] != 3) {
-+      return FBResponseWithStatus([FBCommandStatus invalidArgumentErrorWithMessage:@"each point must be [x, y, ms]" traceback:nil]);
++  BOOL valid = [points isKindOfClass:NSArray.class] && points.count >= 1 && points.count <= 200;
++  for (id point in valid ? points : @[]) {
++    valid = valid && [point isKindOfClass:NSArray.class] && [point count] == 3;
++    for (id value in valid ? point : @[]) {
++      valid = valid && [value isKindOfClass:NSNumber.class] && isfinite([value doubleValue]);
 +    }
 +  }
-+  CFAbsoluteTime start = CFAbsoluteTimeGetCurrent();
-+  double t0 = [points[0][2] doubleValue] / 1000.0;
-+  CGPoint first = CGPointMake([points[0][0] doubleValue], [points[0][1] doubleValue]);
-+  XCPointerEventPath *path = [[XCPointerEventPath alloc] initForTouchAtPoint:first offset:0];
-+  double last = 0;
-+  for (NSUInteger i = 1; i < points.count; i++) {
-+    last = MAX(last, [points[i][2] doubleValue] / 1000.0 - t0);
-+    [path moveToPoint:CGPointMake([points[i][0] doubleValue], [points[i][1] doubleValue]) atOffset:last];
++  if (!valid) {
++    return FBResponseWithStatus([FBCommandStatus invalidArgumentErrorWithMessage:@"points must be 1 to 200 [x, y, ms] number triples" traceback:nil]);
 +  }
-+  [path liftUpAtOffset:last];
-+  XCSynthesizedEventRecord *event = [[XCSynthesizedEventRecord alloc] initWithName:@"touch"
-+                                                              interfaceOrientation:UIInterfaceOrientationPortrait];
-+  [event addPointerEventPath:path];
-+  CFAbsoluteTime built = CFAbsoluteTimeGetCurrent();
-+  NSError *error;
-+  if (![FBXCTestDaemonsProxy synthesizeEventWithRecord:event error:&error]) {
++  if ([request.arguments[@"wait"] isEqual:@NO]) {
++    return FBResponseWithObject(@{@"queued": @([FBXCTestDaemonsProxy enqueueTouch:points completion:nil])});
++  }
++  CFAbsoluteTime start = CFAbsoluteTimeGetCurrent();
++  __block NSError *error = nil;
++  [FBRunLoopSpinner spinUntilCompletion:^(void(^completion)(void)){
++    [FBXCTestDaemonsProxy enqueueTouch:points completion:^(NSError *touchError) {
++      error = touchError;
++      completion();
++    }];
++  }];
++  if (error) {
 +    return FBResponseWithUnknownError(error);
 +  }
-+  CFAbsoluteTime done = CFAbsoluteTimeGetCurrent();
-+  return FBResponseWithObject(@{@"buildMs": @((built - start) * 1000), @"synthMs": @((done - built) * 1000)});
++  return FBResponseWithObject(@{@"ms": @((CFAbsoluteTimeGetCurrent() - start) * 1000)});
 +}
 +
  + (id<FBResponsePayload>)handlePerformW3CTouchActions:(FBRouteRequest *)request
  {
    XCUIApplication *application = request.session.activeApplication;
+diff --git a/WebDriverAgentLib/Utilities/FBXCTestDaemonsProxy.h b/WebDriverAgentLib/Utilities/FBXCTestDaemonsProxy.h
+index 2445c9c..46aa932 100644
+--- a/WebDriverAgentLib/Utilities/FBXCTestDaemonsProxy.h
++++ b/WebDriverAgentLib/Utilities/FBXCTestDaemonsProxy.h
+@@ -26,6 +26,14 @@ NS_ASSUME_NONNULL_BEGIN
+ + (BOOL)synthesizeEventWithRecord:(XCSynthesizedEventRecord *)record
+                             error:(NSError *__autoreleasing*)error;
+ 
++/**
++ Queues one finger along points ([x, y, ms since touch-down] in screen points), lifted at the last one.
++ Calls completion (on any thread) once testmanagerd has performed it. Returns the number of records
++ and touches ahead of it.
++ */
+++ (NSUInteger)enqueueTouch:(NSArray<NSArray<NSNumber *> *> *)points
++                completion:(nullable void (^)(NSError *_Nullable error))completion;
++
+ + (BOOL)openURL:(NSURL *)url usingApplication:(NSString *)bundleId error:(NSError **)error;
+ + (BOOL)openDefaultApplicationForURL:(NSURL *)url error:(NSError **)error;
+ 
+diff --git a/WebDriverAgentLib/Utilities/FBXCTestDaemonsProxy.m b/WebDriverAgentLib/Utilities/FBXCTestDaemonsProxy.m
+index 34fca95..bd68749 100644
+--- a/WebDriverAgentLib/Utilities/FBXCTestDaemonsProxy.m
++++ b/WebDriverAgentLib/Utilities/FBXCTestDaemonsProxy.m
+@@ -17,6 +17,7 @@
+ #import "FBRunLoopSpinner.h"
+ #import "FBScreenRecordingPromise.h"
+ #import "FBScreenRecordingRequest.h"
++#import "XCPointerEventPath.h"
+ #import "XCTestDriver.h"
+ #import "XCTRunnerDaemonSession.h"
+ #import "XCUIApplication.h"
+@@ -103,23 +104,26 @@ static void swizzledLaunchApp(id self, SEL _cmd, NSString *path, NSString *bundl
+   return ((XCTRunnerDaemonSession *)[XCTRunnerDaemonSession sharedSession]).daemonProxy;
+ }
+ 
++/*
++ Every synthesized event goes through one queue. testmanagerd performs one gesture at a time (a second
++ one fails with "only one gesture can be performed at a time") and reports each done about 200 ms after
++ its last finger lifts, so events from different clients (an agent's tap, a viewer's touches, typing)
++ must wait their turn instead of failing. Touches given as points (enqueueTouch:) that pile up while a
++ gesture runs are merged into one record, one finger after another, so they share that ~200 ms.
++ */
++static NSMutableArray<NSDictionary *> *pendingEvents; // {record or points, arrived, done}
++static BOOL eventInFlight;
++static NSUInteger eventRecordNumber; // so a late completion or the watchdog acts only once
++static BOOL eventsStalled; // the watchdog gave up on a record: the touches queued meanwhile are stale
++
+ + (BOOL)synthesizeEventWithRecord:(XCSynthesizedEventRecord *)record error:(NSError *__autoreleasing*)error
+ {
+   __block NSError *innerError = nil;
+   [FBRunLoopSpinner spinUntilCompletion:^(void(^completion)(void)){
+-    void (^errorHandler)(NSError *) = ^(NSError *invokeError) {
+-      if (nil != invokeError) {
+-        innerError = invokeError;
+-      }
++    [self enqueue:@{@"record": record, @"arrived": @(CFAbsoluteTimeGetCurrent()), @"done": ^(NSError *invokeError) {
++      innerError = invokeError;
+       completion();
+-    };
+-
+-    void (^handlerBlock)(XCSynthesizedEventRecord *, NSError *) = ^(XCSynthesizedEventRecord *innerRecord, NSError *invokeError) {
+-      errorHandler(invokeError);
+-    };
+-    [[XCUIDevice.sharedDevice eventSynthesizer] synthesizeEvent:record completion:(id)^(BOOL result, NSError *invokeError) {
+-      handlerBlock(record, invokeError);
+-    }];
++    }}];
+   }];
+   if (nil != innerError) {
+     if (error) {
+@@ -130,6 +134,101 @@ static void swizzledLaunchApp(id self, SEL _cmd, NSString *path, NSString *bundl
+   return YES;
+ }
+ 
+++ (NSUInteger)enqueueTouch:(NSArray<NSArray<NSNumber *> *> *)points completion:(void (^)(NSError *))completion
++{
++  void (^done)(NSError *) = completion ?: ^(NSError *error) {
++    if (error) [FBLogger logFmt:@"Queued touch failed: %@", error.localizedDescription];
++  };
++  return [self enqueue:@{@"points": points, @"arrived": @(CFAbsoluteTimeGetCurrent()), @"done": done}];
++}
++
+++ (NSUInteger)enqueue:(NSDictionary *)entry
++{
++  @synchronized (self) {
++    if (!pendingEvents) pendingEvents = [NSMutableArray array];
++    NSUInteger ahead = pendingEvents.count + (eventInFlight ? 1 : 0);
++    [pendingEvents addObject:entry];
++    if (!eventInFlight) [self sendQueuedEvents];
++    return ahead;
++  }
++}
++
++/**
++ Sends the next queued record alone, or all consecutive queued touches merged into one record: each
++ finger starts after the one before lifts (at least 50 ms later), keeping up to 400 ms of the spacing
++ they arrived with, so two taps on one spot stay two taps. After testmanagerd stalled, touches older
++ than 2 s are dropped rather than replayed onto whatever the screen shows by now. The record's
++ completion sends what queued meanwhile. Call with the class locked.
++ */
+++ (void)sendQueuedEvents
++{
++  CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
++  NSMutableArray<NSDictionary *> *batch = [NSMutableArray array];
++  while (pendingEvents.count) {
++    NSDictionary *entry = pendingEvents.firstObject;
++    if (entry[@"record"] && batch.count) break;
++    [pendingEvents removeObjectAtIndex:0];
++    if (eventsStalled && entry[@"points"] && now - [entry[@"arrived"] doubleValue] > 2) {
++      void (^done)(NSError *) = entry[@"done"];
++      dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
++        done([[FBErrorBuilder builder] withDescription:@"dropped: waited over 2 s for an earlier gesture"].build);
++      });
++      continue;
++    }
++    [batch addObject:entry];
++    if (entry[@"record"]) break;
++  }
++  eventsStalled = NO;
++  eventInFlight = batch.count > 0;
++  if (!eventInFlight) return;
++
++  XCSynthesizedEventRecord *event = batch.firstObject[@"record"];
++  double end = 0;
++  if (!event) {
++    event = [[XCSynthesizedEventRecord alloc] initWithName:@"touch" interfaceOrientation:UIInterfaceOrientationPortrait];
++    double start = 0, arrived = [batch.firstObject[@"arrived"] doubleValue];
++    end = -1;
++    for (NSDictionary *entry in batch) {
++      NSArray<NSArray<NSNumber *> *> *points = entry[@"points"];
++      start = MAX(start + MIN([entry[@"arrived"] doubleValue] - arrived, 0.4), end + 0.05);
++      arrived = [entry[@"arrived"] doubleValue];
++      double t0 = points[0][2].doubleValue / 1000.0, last = 0;
++      XCPointerEventPath *path = [[XCPointerEventPath alloc] initForTouchAtPoint:CGPointMake(points[0][0].doubleValue, points[0][1].doubleValue)
++                                                                         offset:start];
++      for (NSUInteger i = 1; i < points.count; i++) {
++        last = MAX(last, points[i][2].doubleValue / 1000.0 - t0);
++        [path moveToPoint:CGPointMake(points[i][0].doubleValue, points[i][1].doubleValue) atOffset:start + last];
++      }
++      [path liftUpAtOffset:start + last];
++      [event addPointerEventPath:path];
++      end = start + last;
++    }
++  }
++
++  NSUInteger number = ++eventRecordNumber;
++  void (^finish)(NSError *, BOOL) = ^(NSError *error, BOOL stalled) {
++    @synchronized (self) {
++      if (number != eventRecordNumber) return;
++      eventRecordNumber++;
++      eventsStalled = stalled;
++      [self sendQueuedEvents];
++    }
++    for (NSDictionary *entry in batch) {
++      ((void (^)(NSError *))entry[@"done"])(error);
++    }
++  };
++  // Should testmanagerd never answer, later events must not wait forever. Records from elsewhere (typing
++  // can run long) get a minute beyond their length.
++  double patience = MAX(end, event.maximumOffset) + (batch.firstObject[@"record"] ? 60 : 10);
++  dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(patience * NSEC_PER_SEC)),
++                 dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
++    finish([[FBErrorBuilder builder] withDescription:@"testmanagerd did not answer in time"].build, YES);
++  });
++  [[XCUIDevice.sharedDevice eventSynthesizer] synthesizeEvent:event completion:(id)^(BOOL result, NSError *invokeError) {
++    finish(invokeError, NO);
++  }];
++}
++
+ + (BOOL)openURL:(NSURL *)url usingApplication:(NSString *)bundleId error:(NSError *__autoreleasing*)error
+ {
+   XCTRunnerDaemonSession *session = [XCTRunnerDaemonSession sharedSession];

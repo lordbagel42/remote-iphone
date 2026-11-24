@@ -187,17 +187,33 @@ the next keyframe instead of queueing. iOS shows the red broadcast indicator in 
 
 Touches: our WDA adds `POST /wda/touch {"points": [[x, y, ms], …]}` (`vm/wda-raw-touch.patch`), which
 hands the touch straight to XCTest. In the simulator the touch reaches the app ~20–25 ms after the
-request (W3C actions: ~45–55 ms, since WDA first looks up the active app). XCTest then holds the call
-for ~270 ms after the finger lifts, so touches can't overlap; that wait doesn't delay what you see.
+request (W3C actions: ~45–55 ms, since WDA first looks up the active app). testmanagerd performs one
+gesture at a time ("only one gesture can be performed at a time") and finishes each about 200 ms
+after the finger lifts, and it lifts the finger at the end of every gesture, so a drag can only be
+sent once it is complete. The patch puts every synthesized event (`/wda/touch`, W3C actions, typing) through one queue, so
+they wait their turn instead of failing; with `"wait": false` `/wda/touch` answers at once. Touches
+that pile up go out together as one gesture of several fingers in turn, sharing one ~200 ms wait: in
+the simulator, five taps sent 70 ms apart reach the app within 500–650 ms (one at a time: ~1.3 s).
+XCTest's own tap and drag (`/wda/tap`, the agents' default `tap`, and edge swipes) bypass the queue,
+so an agent tapping while someone drives the viewer can get "only one gesture can be performed at a
+time".
 
 ### screen-relay (H.264)
 
 `relay/relay.ts` is a [screen-relay](https://www.npmjs.com/package/screen-relay) engine for the
-phone. It transcodes WDA's MJPEG stream to H.264 with ffmpeg and
+phone. It streams ScreenStream's H.264 (or WDA's MJPEG through ffmpeg) and
 speaks screen-relay's `nsl1` protocol, so screen-relay's own viewer, CLI and Node SDK drive the
 phone. Clicks become taps, drags become gestures, the wheel scrolls, keys and text type, and the
 Home key presses the Home button. It listens on `127.0.0.1:8300` without authentication; `serve`
-forwards screen-relay's paths to it after the same cookie or token checks, and `/relay` is the viewer.
+forwards screen-relay's paths to it after the same cookie or token checks.
+
+`/relay` is a WebRTC viewer: the page signals over the `/rtc` WebSocket, then video and input go
+peer to peer over UDP (STUN finds a path through NAT) instead of through the HTTPS tunnel, where one
+slow TCP segment holds up every frame behind it. ScreenStream's frames are sent as they are, without
+re-encoding; a lost frame costs a keyframe, which the browser asks for and ScreenStream encodes at
+once. Input arrives on a data channel, and touches go from the relay straight to WDA's queue over USB
+(usbmuxd), not through `serve`, which handles one request at a time. When no direct connection comes
+up, the page offers screen-relay's WebSocket viewer at `/relay?ws=1`.
 
 ```sh
 cd relay && pnpm install && IPHONE_API_TOKEN=… node relay.ts     # Node 23.6 or newer, and ffmpeg
