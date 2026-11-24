@@ -44,4 +44,10 @@ timeout 20 agent-browser $S open $U/relay >/dev/null
 sleep 4
 agent-browser $S eval 'document.querySelector("#status").textContent + " | " + document.querySelector("#screen").width + "x" + document.querySelector("#screen").height'
 agent-browser $S screenshot "$PWD/../.amp/in/artifacts/relay-viewer.png" >/dev/null
+agent-browser $S click '#iphone-buttons [data-press=home]' >/dev/null
+agent-browser $S click '#iphone-buttons [data-press=volumeup]' >/dev/null
+sleep 1
+echo "WDA calls from the viewer's phone buttons:"
+curl -s http://127.0.0.1:18100/calls | python3 -c 'import json,sys; [print(" ", c[0], json.dumps(c[1])) for c in json.load(sys.stdin)["value"][-2:]]'
+
 echo "relay log:"; cat /tmp/relay.log

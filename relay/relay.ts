@@ -30,9 +30,42 @@ const MAX_UNACKED_BYTES = 8 << 20;
 
 const log = (msg: string) => console.error(`${new Date().toISOString().slice(11, 19)} ${msg}`);
 const viewerDir = fileURLToPath(new URL("../viewer/", import.meta.resolve("screen-relay")));
+// screen-relay's viewer has no phone buttons, so the page gets a bar of them. They call
+// `iphone.py serve`'s /press with the login cookie, like the MJPEG page's buttons.
+const PHONE_BUTTONS = `
+<style>
+#iphone-buttons{position:fixed;right:12px;top:50%;transform:translateY(-50%);z-index:3;display:flex;flex-direction:column;gap:4px;padding:4px;
+  border-radius:14px;background:rgba(12,12,12,.86);-webkit-backdrop-filter:blur(12px);backdrop-filter:blur(12px);
+  border:1px solid rgba(255,255,255,.12);box-shadow:0 8px 24px rgba(0,0,0,.45)}
+#iphone-buttons button{min-width:64px;padding:8px 10px;border:0;border-radius:10px;background:transparent;color:#ededed;
+  font:500 12px/1 system-ui,-apple-system,sans-serif;cursor:pointer}
+#iphone-buttons button:hover{background:rgba(255,255,255,.1)}
+#iphone-buttons button:active{background:rgba(255,255,255,.2)}
+#iphone-buttons button:focus-visible{outline:2px solid #3b82f6;outline-offset:1px}
+#iphone-buttons .sep{height:1px;margin:2px 6px;background:rgba(255,255,255,.12)}
+</style>
+<nav id="iphone-buttons" aria-label="iPhone buttons">
+  <button type="button" data-press="home" title="Home button">Home</button>
+  <button type="button" data-press="appswitcher" title="App switcher: double press of Home">Apps</button>
+  <button type="button" data-press="lock" title="Side button: lock">Lock</button>
+  <button type="button" data-press="unlock" title="Wake and unlock">Wake</button>
+  <div class="sep"></div>
+  <button type="button" data-press="volumeup" title="Volume up">Vol +</button>
+  <button type="button" data-press="volumedown" title="Volume down">Vol −</button>
+</nav>
+<script>
+document.querySelectorAll("#iphone-buttons [data-press]").forEach((b) => b.addEventListener("click", async () => {
+  const res = await fetch("/press", { method: "POST", headers: { "Content-Type": "application/json" },
+                                      body: JSON.stringify({ button: b.dataset.press }) }).catch(() => null);
+  if (res && res.status === 401) location.href = "/";
+  document.querySelector("#screen")?.focus();
+}));
+</script>
+</body>`;
+const viewerPage = Buffer.from(readFileSync(viewerDir + "index.html", "utf8").replace("</body>", PHONE_BUTTONS));
 const VIEWER: Record<string, [string, Buffer]> = {
-  "/": ["text/html; charset=utf-8", readFileSync(viewerDir + "index.html")],
-  "/index.html": ["text/html; charset=utf-8", readFileSync(viewerDir + "index.html")],
+  "/": ["text/html; charset=utf-8", viewerPage],
+  "/index.html": ["text/html; charset=utf-8", viewerPage],
   "/viewer.js": ["text/javascript; charset=utf-8", readFileSync(viewerDir + "viewer.js")],
 };
 
