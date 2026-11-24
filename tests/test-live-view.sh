@@ -18,6 +18,7 @@ C=$(curl -s -D - -o /dev/null -d password=correct-horse $U/login | grep -i '^set
 echo "cookie attrs: $(curl -s -D - -o /dev/null -d password=correct-horse $U/login | grep -i '^set-cookie' | cut -d';' -f2-)"
 echo "/ with cookie: $(curl -s -o /dev/null -w '%{http_code} %{redirect_url}' -H "Cookie: $C" $U/)"
 echo "/mjpeg with cookie: $(curl -s -H "Cookie: $C" $U/mjpeg | grep -o 'live.mjpeg' | head -1)"
-curl -s -m 3 -H "Cookie: $C" $U/live.mjpeg -o /tmp/stream.bin; echo "stream bytes in 3s: $(wc -c </tmp/stream.bin), frames: $(grep -ac 'Content-type: image/jpeg' /tmp/stream.bin)"
+echo "old tab (no v=2): $(curl -s -o /dev/null -w %{http_code} -H "Cookie: $C" $U/live.mjpeg)"
+curl -s -m 3 -H "Cookie: $C" "$U/live.mjpeg?v=2" -o /tmp/stream.bin; echo "stream bytes in 3s: $(wc -c </tmp/stream.bin), frames: $(grep -ac 'Content-type: image/jpeg' /tmp/stream.bin)"
 head -c 120 /tmp/stream.bin | head -3
 echo "api still needs bearer: $(curl -s -o /dev/null -w %{http_code} -H "Cookie: $C" $U/status)"

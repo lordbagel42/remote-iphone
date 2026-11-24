@@ -660,7 +660,7 @@ LIVE_PAGE = f"""<!doctype html><html lang="en"><head><title>iPhone</title>{PAGE_
     let last = Date.now();
     const watchdog = setInterval(() => {{ if (Date.now() - last > 5000) ctrl.abort(); }}, 1000);
     try {{
-      const res = await fetch("/live.mjpeg", {{ signal: ctrl.signal, cache: "no-store" }});
+      const res = await fetch("/live.mjpeg?v=2", {{ signal: ctrl.signal, cache: "no-store" }});
       if (res.status === 401) {{ location.reload(); return; }}
       if (!res.ok) throw new Error("HTTP " + res.status);
       const reader = res.body.getReader();
@@ -1080,6 +1080,10 @@ def cmd_serve(args) -> None:
                 return self._send(303, "text/plain", b"", {"Location": "/relay"})
             if path == "/mjpeg":
                 return self._send(200, "text/html; charset=utf-8", LIVE_PAGE.encode())
+            if "v=2" not in self.path.partition("?")[2].split("&"):
+                # A tab from before / became the H.264 viewer: a 401 makes it reload, which lands on /relay
+                # instead of keeping WDA capturing screenshots for it.
+                return self._send(401, "text/plain", b"reload")
             try:  # /live.mjpeg: relay WDA's own HTTP/1.0 multipart response byte for byte
                 upstream = socket.create_connection(mjpeg_addr, timeout=10)
             except OSError:
