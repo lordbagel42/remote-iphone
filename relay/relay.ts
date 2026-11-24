@@ -146,7 +146,7 @@ class Video {
           [
             "exec ffmpeg -hide_banner -loglevel error -fflags nobuffer -flags low_delay",
             "-probesize 32 -analyzeduration 0 -f mpjpeg -i \"$RELAY_MJPEG_URL\" -an",
-            "-c:v libx264 -preset ultrafast -tune zerolatency -pix_fmt yuv420p",
+            "-vf 'scale=trunc(iw/2)*2:trunc(ih/2)*2' -c:v libx264 -preset ultrafast -tune zerolatency -pix_fmt yuv420p",
             `-g ${FPS * 2} -x264-params repeat-headers=1:aud=1 -f h264 -`,
           ].join(" "),
         ];

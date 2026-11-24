@@ -124,7 +124,7 @@ class WDA:
     def tap(self, x: float, y: float, fast: bool = False) -> None:
         """XCTest's tap waits for the app to idle first (about 1 s); fast sends the touch at once."""
         if fast:
-            self.gesture([[x, y, 0], [x, y, 50]])
+            self.gesture([[x, y, 0], [x, y, 100]])
         else:
             self.s("POST", "/wda/tap", {"x": x, "y": y})
 
@@ -421,8 +421,12 @@ def run_once(udid: str, bundle_id: str | None) -> None:
         log(f"WDA ready at {url}")
         try:  # WDA's MJPEG stream defaults to 10 fps; the A15 manages about 30 at full size
             fps = int(os.environ.get("WDA_MJPEG_FPS", "30"))
-            WDA(url).s("POST", "/appium/settings", {"settings": {"mjpegServerFramerate": fps}})
-            log(f"MJPEG stream set to {fps} fps")
+            # Scaling on the phone (percent) cuts the bytes every hop carries: the USB tunnel, the
+            # port forward and ffmpeg all run in Python or on the host's CPU.
+            scale = int(os.environ.get("WDA_MJPEG_SCALE", "100"))
+            settings = {"mjpegServerFramerate": fps, "mjpegScalingFactor": scale}
+            WDA(url).s("POST", "/appium/settings", {"settings": settings})
+            log(f"MJPEG stream set to {fps} fps at {scale}% size")
         except (WDAError, httpx.HTTPError, ValueError) as e:
             log(f"could not set the MJPEG frame rate: {e}")
         fails = 0

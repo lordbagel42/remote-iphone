@@ -9,7 +9,7 @@ TOKEN=$(head -c 32 /dev/urandom | xxd -p -c 64)
 for n in "iphone.py serve" fake-wda.py fake-mjpeg.py relay.ts; do for p in $(pgrep -f "$n"); do [ "$p" != $$ ] && kill "$p" 2>/dev/null; done; done
 sleep 1
 (uv run -q --with pillow python $B/fake-wda.py 18100 >/tmp/fw.log 2>&1 &)
-(uv run -q --with pillow python $B/fake-mjpeg.py 19100 >/tmp/fm.log 2>&1 &)
+(uv run -q --with pillow python $B/fake-mjpeg.py 19100 ${FAKE_SIZE:-} >/tmp/fm.log 2>&1 &)
 (IPHONE_API_TOKEN=$TOKEN WDA_URL=http://127.0.0.1:18100 WDA_MJPEG_PORT=19100 RELAY_PORT=18300 IPHONE_VIEW_PASSWORD=correct-horse \
   IPHONE_PUBLIC_URL=$U host/iphone.py serve --port 18200 >/tmp/serve-relay.log 2>&1 &)
 (cd relay && IPHONE_API_TOKEN=$TOKEN IPHONE_API=$U RELAY_PORT=18300 RELAY_MJPEG_URL=http://127.0.0.1:19100 node relay.ts >/tmp/relay.log 2>&1 &)

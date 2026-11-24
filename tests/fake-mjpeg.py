@@ -3,8 +3,11 @@ import io, socket, sys, threading, time
 from PIL import Image, ImageDraw
 
 
+W, H = (int(v) for v in (sys.argv[2:4] or (750, 1334)))
+
+
 def frame(i: int) -> bytes:
-    img = Image.new("RGB", (750, 1334), (20, 20 + (i * 7) % 200, 120))
+    img = Image.new("RGB", (W, H), (20, 20 + (i * 7) % 200, 120))
     ImageDraw.Draw(img).text((60, 600), f"frame {i}", fill=(255, 255, 255))
     buf = io.BytesIO()
     img.save(buf, "JPEG", quality=60)
