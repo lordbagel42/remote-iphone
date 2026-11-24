@@ -136,7 +136,7 @@ It needs `IPHONE_API_TOKEN` (32+ characters) and `IPHONE_PUBLIC_URL`, and talks 
 | `POST /tap` | `{x, y}` or `{text}` | |
 | `POST /swipe` | `{from_x, from_y, to_x, to_y, duration?}` | |
 | `POST /type` | `{text}` | |
-| `POST /press` | `{button}` | home, appswitcher (double Home), volumeup, volumedown, lock, unlock |
+| `POST /press` | `{button}` | home, volumeup, volumedown, lock, unlock |
 | `POST /launch` | `{bundle_id, restart?}` | |
 | `POST /home` | | |
 | `POST /recording/start` | `{max_seconds?}` (default 300, at most 1800) | starts recording the screen; 422 if one is running |

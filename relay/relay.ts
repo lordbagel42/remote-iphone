@@ -54,7 +54,6 @@ const PHONE_BUTTONS = `
 </style>
 <nav id="iphone-buttons" aria-label="iPhone buttons">
   <button type="button" data-press="home" title="Home button">Home</button>
-  <button type="button" data-press="appswitcher" title="App switcher: double press of Home">Apps</button>
   <button type="button" data-press="lock" title="Side button: lock">Lock</button>
   <button type="button" data-press="unlock" title="Wake and unlock">Wake</button>
   <div class="sep"></div>

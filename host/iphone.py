@@ -171,11 +171,8 @@ class WDA:
             self.s("POST", "/wda/unlock")
         elif name in ("home", "volumeup", "volumedown"):
             self.s("POST", "/wda/pressButton", {"name": name})
-        elif name in ("appswitcher", "apps", "multitask"):  # a double press of the Home button
-            self.s("POST", "/wda/pressButton", {"name": "home"})
-            self.s("POST", "/wda/pressButton", {"name": "home"})
         else:
-            raise WDAError("invalid argument", "button must be home, appswitcher, volumeup, volumedown, lock or unlock")
+            raise WDAError("invalid argument", "button must be home, volumeup, volumedown, lock or unlock")
 
     def home(self) -> None:
         self.req("POST", "/wda/homescreen")
@@ -553,7 +550,7 @@ LIVE_PAGE = f"""<!doctype html><html lang="en"><head><title>iPhone</title>{PAGE_
     <span class="muted" id="state">Connecting…</span></div>
   <div class="screen" id="frame"><img id="screen" alt="Live iPhone screen. Click to tap, drag to swipe."></div>
   <div class="controls">
-    <button data-press="home">Home</button><button data-press="appswitcher">App Switcher</button>
+    <button data-press="home">Home</button>
     <button data-press="unlock">Wake</button>
     <button data-press="lock">Lock</button><button data-press="volumedown">Vol −</button>
     <button data-press="volumeup">Vol +</button>
@@ -1141,7 +1138,7 @@ def cmd_mcp(_args) -> None:
 
     @m.tool()
     def press_button(name: str) -> str:
-        """Press a hardware button: home, appswitcher (double Home), volumeup, volumedown, lock, or unlock."""
+        """Press a hardware button: home, volumeup, volumedown, lock, or unlock."""
         wda.press(name)
         return "ok"
 
@@ -1209,7 +1206,7 @@ def main() -> None:
         sp.add_argument(a, type=float)
     sp.add_argument("--duration", type=float, default=0.2)
     sub.add_parser("type").add_argument("text")
-    sub.add_parser("press").add_argument("button", help="home, appswitcher, volumeup, volumedown, lock, unlock")
+    sub.add_parser("press").add_argument("button", help="home, volumeup, volumedown, lock, unlock")
     sp = sub.add_parser("launch")
     sp.add_argument("bundle_id")
     sp.add_argument("--restart", action="store_true")
