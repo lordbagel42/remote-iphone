@@ -215,4 +215,4 @@ Verified in the macOS VM:
 
 Not verified (no physical iPhone reaches the VM): installing on the phone, `tunneld` over Wi‑Fi to
 iOS 18.3.1, DDI mounting, and launching the runner with `pymobiledevice3 developer dvt xcuitest`.
-Run steps 2–6 above to verify them; `~/.iphone-wda/xcuitest.out` and `xcuitest.log` show why a launch fails.
+Run steps 2–6 above to verify them; `~/.iphone-wda/xcuitest.log` shows why a launch fails (it keeps the last 5–10 MB).

@@ -307,7 +307,7 @@ def wait_for_wda(proc: subprocess.Popen, udid: str, xclog: Path, timeout: float 
     deadline = time.time() + timeout
     while time.time() < deadline:
         if proc.poll() is not None:
-            raise RuntimeError(f"xcuitest exited with code {proc.returncode}; see {STATE / 'xcuitest.out'}")
+            raise RuntimeError(f"xcuitest exited with code {proc.returncode}; see {xclog}")
         for url in wda_candidates(udid, xclog):
             if wda_ok(url):
                 return url
@@ -383,6 +383,20 @@ class WDAProxyHandler(socketserver.BaseRequestHandler):
         upstream.close()
 
 
+def keep_log(stream, path: Path, limit: int = 5 << 20) -> None:
+    """Copies the XCUITest runner's output to path, keeping at most two files of `limit` bytes:
+    XCTest logs a line for every streamed frame, about 10 GB a day while someone watches."""
+    out = path.open("wb")
+    for line in stream:
+        if out.tell() > limit:
+            out.close()
+            path.replace(path.with_name(path.name + ".1"))
+            out = path.open("wb")
+        out.write(line)
+        out.flush()
+    out.close()
+
+
 def run_once(udid: str, bundle_id: str | None) -> None:
     global PROXY_HOST
     log(f"waiting for a tunnel to {udid} (phone unlocked, on the same Wi-Fi, or plugged in)")
@@ -406,16 +420,17 @@ def run_once(udid: str, bundle_id: str | None) -> None:
             "--tunnel",
             udid,
             "--output-log",
-            str(xclog),
+            "/dev/stdout",
             "--env",
             f"USE_PORT={WDA_PORT}",
             "--env",
             f"MJPEG_SERVER_PORT={MJPEG_PORT}",
         ],
-        stdout=(STATE / "xcuitest.out").open("w"),
+        stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         start_new_session=True,
     )
+    threading.Thread(target=keep_log, args=(proc.stdout, xclog), daemon=True).start()
     try:
         url = wait_for_wda(proc, udid, xclog)
         (STATE / "wda_url").write_text(url)
@@ -653,6 +668,14 @@ LIVE_PAGE = f"""<!doctype html><html lang="en"><head><title>iPhone</title>{PAGE_
 </script></body></html>"""
 
 
+def send_timeout(sock: socket.socket, seconds: int = 30) -> None:
+    """Fails sends to a viewer that stopped reading (gone, but its connection still open), so its
+    stream is dropped instead of holding WDA's screen capture open. Receives may stay idle."""
+    import struct
+
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_SNDTIMEO, struct.pack("ll", seconds, 0))
+
+
 def cmd_serve(args) -> None:
     """Token-protected HTTP API over WDA, for agents outside the LAN (behind an HTTPS tunnel)."""
     import hmac
@@ -795,6 +818,7 @@ def cmd_serve(args) -> None:
                 upstream = socket.create_connection(mjpeg_addr, timeout=10)
             except OSError:
                 return self._send(503, "text/plain", b"WebDriverAgent is not running")
+            send_timeout(self.connection)
             try:
                 upstream.sendall(b"GET / HTTP/1.0\r\n\r\n")
                 upstream.settimeout(60)
@@ -854,6 +878,7 @@ def cmd_serve(args) -> None:
                         except OSError:
                             pass
 
+            send_timeout(self.connection)
             if upgrade:
                 threading.Thread(target=pump, args=(self.connection, upstream), daemon=True).start()
             pump(upstream, self.connection)

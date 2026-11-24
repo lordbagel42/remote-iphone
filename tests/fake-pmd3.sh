@@ -7,6 +7,7 @@ case "$1 $2" in
     echo "xcuitest args: $*" >> /tmp/fake-pmd3.calls
     while [ $# -gt 0 ]; do [ "$1" = --output-log ] && LOG="$2"; shift; done
     sleep 3; echo "ServerURLHere->http://127.0.0.1:8100<-ServerURLHere" > "$LOG"
+    [ -n "$FAKE_SPAM" ] && yes "t =  1.00s Creating future for 'getting screen bounds'" | head -c "$FAKE_SPAM" > "$LOG"
     sleep ${FAKE_LIFETIME:-20}; exit 1;;
   *) echo "unexpected: $*" >&2; exit 2;;
 esac

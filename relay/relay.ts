@@ -38,11 +38,19 @@ const PHONE_BUTTONS = `
   border-radius:14px;background:rgba(12,12,12,.86);-webkit-backdrop-filter:blur(12px);backdrop-filter:blur(12px);
   border:1px solid rgba(255,255,255,.12);box-shadow:0 8px 24px rgba(0,0,0,.45)}
 #iphone-buttons button{min-width:64px;padding:8px 10px;border:0;border-radius:10px;background:transparent;color:#ededed;
-  font:500 12px/1 system-ui,-apple-system,sans-serif;cursor:pointer}
+  font:500 12px/1 system-ui,-apple-system,sans-serif;cursor:pointer;white-space:nowrap}
 #iphone-buttons button:hover{background:rgba(255,255,255,.1)}
 #iphone-buttons button:active{background:rgba(255,255,255,.2)}
 #iphone-buttons button:focus-visible{outline:2px solid #3b82f6;outline-offset:1px}
 #iphone-buttons .sep{height:1px;margin:2px 6px;background:rgba(255,255,255,.12)}
+/* Keep the bar beside the phone: reserve its width on both sides so the screen stays centered. */
+#screen{width:min(calc(100vw - 200px),calc(100dvh*var(--w)/var(--h)));height:min(100dvh,calc((100vw - 200px)*var(--h)/var(--w)))}
+@media (max-width:640px){
+  #iphone-buttons{top:auto;bottom:8px;right:50%;transform:translateX(50%);flex-direction:row}
+  #iphone-buttons button{min-width:0}
+  #iphone-buttons .sep{width:1px;height:auto;margin:6px 2px}
+  #screen{width:min(100vw,calc((100dvh - 64px)*var(--w)/var(--h)));height:min(calc(100dvh - 64px),calc(100vw*var(--h)/var(--w)));margin:0 auto auto}
+}
 </style>
 <nav id="iphone-buttons" aria-label="iPhone buttons">
   <button type="button" data-press="home" title="Home button">Home</button>
