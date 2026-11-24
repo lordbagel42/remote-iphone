@@ -149,6 +149,24 @@ the stream when it stalls or WDA restarts. On the page, click to tap, drag to sw
 press, use the Home/Wake/Lock/volume buttons, and type into the focused field. The login cookie
 authorizes those API calls only when they come from the page itself (matching `Origin`).
 
+Taps from the page and the relay send `"fast": true`: a W3C touch sent at once, instead of XCTest's
+tap, which first waits about a second for the app to idle. Agents' taps keep XCTest's waiting tap.
+`POST /gesture {"points": [[x, y, ms], …]}` replays one finger along a path.
+
+### screen-relay (H.264)
+
+`relay/relay.ts` is a [screen-relay](https://www.npmjs.com/package/screen-relay) engine for the
+phone. It transcodes WDA's MJPEG stream to H.264 with ffmpeg and
+speaks screen-relay's `nsl1` protocol, so screen-relay's own viewer, CLI and Node SDK drive the
+phone. Clicks become taps, drags become gestures, the wheel scrolls, keys and text type, and the
+Home key presses the Home button. It listens on `127.0.0.1:8300` without authentication; `serve`
+forwards screen-relay's paths to it after the same cookie or token checks, and `/relay` is the viewer.
+
+```sh
+cd relay && pnpm install && IPHONE_API_TOKEN=… node relay.ts     # Node 23.6 or newer, and ffmpeg
+npx screen-relay click 0.5 0.25 --url https://iphone.example.com --token-file token   # the API token
+```
+
 ## How `up` recovers
 
 `iphone.py up` loops forever: wait for `tunneld` to have a tunnel to the phone (Wi‑Fi via

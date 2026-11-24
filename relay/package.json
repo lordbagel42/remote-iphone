@@ -1,0 +1,20 @@
+{
+  "name": "iphone-relay",
+  "private": true,
+  "type": "module",
+  "description": "screen-relay engine for the iPhone: H.264 stream and input over screen-relay's nsl1 protocol",
+  "engines": { "node": ">=23.6" },
+  "scripts": {
+    "start": "node relay.ts",
+    "check": "tsc --noEmit"
+  },
+  "dependencies": {
+    "screen-relay": "0.1.5",
+    "ws": "^8.18.0"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "@types/ws": "^8.5.12",
+    "typescript": "^5.9.0"
+  }
+}

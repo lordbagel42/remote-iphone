@@ -79,6 +79,9 @@ class WDA:
         sid = r.get("sessionId") or r["value"]["sessionId"]
         STATE.mkdir(parents=True, exist_ok=True)
         (STATE / "session").write_text(sid)
+        # W3C actions otherwise wait up to 2 s for the app to settle before answering; live control
+        # needs the touch sent at once. Agents' taps go through XCTest's tap, which waits by itself.
+        self.req("POST", f"/session/{sid}/appium/settings", {"settings": {"animationCoolOffTimeout": 0}})
         return sid
 
     def s(self, method: str, path: str, body: dict | None = None):
@@ -118,8 +121,12 @@ class WDA:
         v = self.req("GET", f"/source?format={fmt}")
         return v if isinstance(v, str) else json.dumps(v, indent=1)
 
-    def tap(self, x: float, y: float) -> None:
-        self.s("POST", "/wda/tap", {"x": x, "y": y})
+    def tap(self, x: float, y: float, fast: bool = False) -> None:
+        """XCTest's tap waits for the app to idle first (about 1 s); fast sends the touch at once."""
+        if fast:
+            self.gesture([[x, y, 0], [x, y, 50]])
+        else:
+            self.s("POST", "/wda/tap", {"x": x, "y": y})
 
     def tap_element(self, text: str) -> tuple[float, float]:
         q = text.replace("\\", "\\\\").replace('"', '\\"')
@@ -133,6 +140,22 @@ class WDA:
     def swipe(self, x1: float, y1: float, x2: float, y2: float, duration: float = 0.2) -> None:
         body = {"fromX": x1, "fromY": y1, "toX": x2, "toY": y2, "duration": duration}
         self.s("POST", "/wda/dragfromtoforduration", body)
+
+    def gesture(self, points: list[list[float]]) -> None:
+        """One finger along [x, y, ms since touch-down] points, lifted at the last one (W3C actions)."""
+        x0, y0, t0 = points[0]
+        steps = [{"type": "pointerMove", "duration": 0, "x": x0, "y": y0}, {"type": "pointerDown", "button": 0}]
+        px, py, pt = x0, y0, t0
+        for x, y, t in points[1:]:
+            ms = max(int(t - pt), 0)
+            if (x, y) == (px, py):
+                steps.append({"type": "pause", "duration": ms})
+            else:
+                steps.append({"type": "pointerMove", "duration": ms, "x": x, "y": y})
+            px, py, pt = x, y, t
+        steps.append({"type": "pointerUp", "button": 0})
+        finger = {"type": "pointer", "id": "finger1", "parameters": {"pointerType": "touch"}, "actions": steps}
+        self.s("POST", "/actions", {"actions": [finger]})
 
     def type(self, text: str) -> None:
         self.s("POST", "/wda/keys", {"value": list(text)})
@@ -297,6 +320,19 @@ def stop(proc: subprocess.Popen) -> None:
         except subprocess.TimeoutExpired:
             os.killpg(proc.pid, signal.SIGKILL)
 
+
+# Paths `serve` forwards to the screen-relay engine for the iPhone (relay/relay.ts).
+RELAY_PATHS = {
+    "/relay",
+    "/viewer.js",
+    "/stream",
+    "/control",
+    "/capabilities",
+    "/metrics",
+    "/input",
+    "/screenshot.png",
+    "/clipboard",
+}
 
 PROXY_HOST: str | None = None  # the address WDA currently answers on, set by run_once
 MJPEG_PORT = 9100  # WDA's screen stream (MJPEG_SERVER_PORT on the device)
@@ -501,7 +537,8 @@ LIVE_PAGE = f"""<!doctype html><html lang="en"><head><title>iPhone</title>{PAGE_
     <button type="submit">Send</button><button type="button" id="enter">Return</button>
   </form>
   <div class="error" id="err" role="status"></div>
-  <a href="/logout" class="muted">Log out</a>
+  <div class="row"><a href="/relay" class="muted">H.264 viewer (screen-relay)</a>
+    <a href="/logout" class="muted">Log out</a></div>
 </main>
 <script>
   // Read the MJPEG stream with fetch so a stalled or ended stream is noticed and reopened
@@ -589,7 +626,7 @@ LIVE_PAGE = f"""<!doctype html><html lang="en"><head><title>iPhone</title>{PAGE_
     const up = point(ev), held = (performance.now() - down.t) / 1000, start = down;
     down = null; ripple(up);
     if (Math.hypot(up.x - start.x, up.y - start.y) < 8) {{
-      if (held < 0.5) act("/tap", {{ x: start.x, y: start.y }});
+      if (held < 0.5) act("/tap", {{ x: start.x, y: start.y, fast: true }});
       else act("/swipe", {{ from_x: start.x, from_y: start.y, to_x: start.x, to_y: start.y, duration: Math.min(held, 3) }});
     }} else {{
       act("/swipe", {{ from_x: start.x, from_y: start.y, to_x: up.x, to_y: up.y,
@@ -623,6 +660,7 @@ def cmd_serve(args) -> None:
     view_key = hmac.new(token.encode(), b"live-view-cookie", "sha256").digest()
     wda = WDA()
     mjpeg_addr = (urlsplit(wda.url).hostname, int(os.environ.get("WDA_MJPEG_PORT", MJPEG_PORT)))
+    relay_addr = ("127.0.0.1", int(os.environ.get("RELAY_PORT", "8300")))
     lock = threading.Lock()  # one phone: run one action at a time
     shots: dict[str, tuple[float, bytes]] = {}  # unguessable id -> (expiry, JPEG), for screenshot links
 
@@ -655,9 +693,14 @@ def cmd_serve(args) -> None:
             if "text" in body:
                 x, y = wda.tap_element(str(body["text"]))
                 return ok({"x": x, "y": y})
-            wda.tap(float(body["x"]), float(body["y"]))
+            wda.tap(float(body["x"]), float(body["y"]), bool(body.get("fast", False)))
         elif path == "/swipe":
             wda.swipe(*(float(body[k]) for k in ("from_x", "from_y", "to_x", "to_y")), float(body.get("duration", 0.2)))
+        elif path == "/gesture":
+            pts = [[float(v) for v in p] for p in body["points"]]
+            if not 2 <= len(pts) <= 100 or any(len(p) != 3 for p in pts):
+                raise ValueError("points must be 2 to 100 [x, y, ms] triples")
+            wda.gesture(pts)
         elif path == "/type":
             wda.type(str(body["text"]))
         elif path == "/press":
@@ -680,6 +723,8 @@ def cmd_serve(args) -> None:
                 return self._send(404, "application/json", b'{"ok":false,"error":"expired or unknown"}')
             if view_password and self.path.partition("?")[0] in ("/", "/login", "/logout", "/live.mjpeg"):
                 return self._view(method)
+            if self.path.partition("?")[0] in RELAY_PATHS:
+                return self._relay(method)
             given = self.headers.get("Authorization", "")
             bearer_ok = hmac.compare_digest(given.encode(), f"Bearer {token}".encode())
             # The live page drives the phone with its login cookie; POSTs must come from the page itself.
@@ -751,6 +796,60 @@ def cmd_serve(args) -> None:
                 pass  # viewer left or WDA restarted; the page reconnects
             finally:
                 upstream.close()
+
+        # screen-relay viewer, CLI and SDK: forwarded byte for byte (WebSockets too) to the relay engine
+        # (relay/relay.ts), after the same checks as the API. /relay is the viewer page.
+        def _relay(self, method: str) -> None:
+            path = self.path.partition("?")[0]
+            offered = [p.strip() for p in self.headers.get("Sec-WebSocket-Protocol", "").split(",")]
+            bearer_ok = hmac.compare_digest(self.headers.get("Authorization", "").encode(), f"Bearer {token}".encode())
+            bearer_ok = bearer_ok or any(hmac.compare_digest(p.encode(), f"bearer.{token}".encode()) for p in offered)
+            upgrade = self.headers.get("Upgrade", "").lower() == "websocket"
+            # Browsers send Origin on WebSockets and POSTs; the cookie is SameSite=Strict besides.
+            same_origin = (method == "GET" and not upgrade) or self.headers.get("Origin", "") == public_url
+            if not bearer_ok and not (view_password and self._viewer() and same_origin):
+                if path == "/relay" and not upgrade:
+                    return self._send(303, "text/plain", b"", {"Location": "/"})
+                return self._send(401, "application/json", b'{"error":"unauthorized"}')
+            body = b""
+            if method == "POST":
+                length = int(self.headers.get("Content-Length") or 0)
+                if length > 1 << 20:
+                    return self._send(413, "application/json", b'{"error":"too_large"}')
+                body = self.rfile.read(length)
+            try:
+                upstream = socket.create_connection(relay_addr, timeout=10)
+            except OSError:
+                return self._send(503, "application/json", b'{"error":"the relay engine is not running"}')
+            upstream.settimeout(None)
+            target = "/" + self.path[len("/relay") :].lstrip("/") if path == "/relay" else self.path
+            lines = [f"{method} {target} HTTP/1.1"]
+            for k, v in self.headers.items():
+                if k.lower() not in ("connection", "authorization", "cookie", "host") or (
+                    k.lower() == "connection" and upgrade
+                ):
+                    lines.append(f"{k}: {v}")
+            lines += [f"Host: {relay_addr[0]}:{relay_addr[1]}"] + ([] if upgrade else ["Connection: close"])
+            upstream.sendall(("\r\n".join(lines) + "\r\n\r\n").encode() + body)
+            self.close_connection = True
+
+            def pump(src: socket.socket, dst: socket.socket) -> None:
+                try:
+                    while data := src.recv(65536):
+                        dst.sendall(data)
+                except OSError:
+                    pass
+                finally:
+                    for s in (src, dst):
+                        try:
+                            s.shutdown(socket.SHUT_RDWR)
+                        except OSError:
+                            pass
+
+            if upgrade:
+                threading.Thread(target=pump, args=(self.connection, upstream), daemon=True).start()
+            pump(upstream, self.connection)
+            upstream.close()
 
         def _viewer(self) -> bool:
             for part in self.headers.get("Cookie", "").split(";"):
